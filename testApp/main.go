@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -224,10 +225,40 @@ func createEmbeddingProvider() (embedding.Provider, error) {
 
 // Command implementations
 
+// preprocessDebugFlag handles "-debug 200" syntax and reorders args so flags come first
+func preprocessDebugFlag(args []string) []string {
+	var flags []string
+	var positional []string
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "-") {
+			// Handle "-debug 200" syntax
+			if arg == "-debug" && i+1 < len(args) {
+				if _, err := strconv.Atoi(args[i+1]); err == nil {
+					flags = append(flags, "-debug="+args[i+1])
+					i++ // skip the number
+					continue
+				}
+			}
+			flags = append(flags, arg)
+		} else {
+			positional = append(positional, arg)
+		}
+	}
+
+	// Return flags first, then positional args
+	return append(flags, positional...)
+}
+
 func runIndexCommand(args []string) {
 	fs := flag.NewFlagSet("index", flag.ExitOnError)
+	debugBlocks := fs.Int("debug", 0, "Show detailed parsing output (default 20 blocks, or specify count)")
 	addCommonFlags(fs)
-	fs.Parse(args)
+
+	// Pre-process args to handle "-debug 200" as "-debug=200"
+	processedArgs := preprocessDebugFlag(args)
+	fs.Parse(processedArgs)
 
 	if fs.NArg() < 1 {
 		fmt.Println("Error: Please provide a document file path (PDF or DOCX)")
@@ -288,8 +319,8 @@ func runIndexCommand(args []string) {
 
 	if len(textBlocks) > 0 {
 		fmt.Println()
-		fmt.Println("First few text blocks:")
-		limit := 3
+		fmt.Println("First text blocks:")
+		limit := 20
 		if len(textBlocks) < limit {
 			limit = len(textBlocks)
 		}
@@ -301,6 +332,145 @@ func runIndexCommand(args []string) {
 			}
 			fmt.Printf("  [Page %d] %s: %s\n", block.Page, block.Type, content)
 		}
+	}
+
+	if *debugBlocks >= 0 {
+		// Check if -debug flag was explicitly set (will be >= 0 if set, 0 is default)
+		// We need to detect if flag was set vs just default
+		debugSet := false
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "debug" {
+				debugSet = true
+			}
+		})
+		if debugSet {
+			limit := *debugBlocks
+			if limit == 0 {
+				limit = 20 // default to 20 if -debug with no value
+			}
+			printDebugOutput(doc, limit)
+		}
+	}
+}
+
+// printDebugOutput prints detailed parsing information for debugging
+func printDebugOutput(doc *docuindex.Document, maxBlocks int) {
+	fmt.Println()
+	fmt.Println("=== DEBUG: Parsed Content ===")
+	fmt.Println()
+
+	// Group blocks by page
+	pageBlocks := make(map[int][]docuindex.ContentBlock)
+	for _, block := range doc.Content.Blocks {
+		pageBlocks[block.Page] = append(pageBlocks[block.Page], block)
+	}
+
+	// Print blocks organized by page, respecting maxBlocks limit
+	blockCount := 0
+	for page := 1; page <= doc.Info.PageCount; page++ {
+		blocks := pageBlocks[page]
+		if len(blocks) == 0 {
+			continue
+		}
+		fmt.Printf("--- Page %d ---\n", page)
+		for i, block := range blocks {
+			if blockCount >= maxBlocks {
+				fmt.Printf("\n... (showing first %d blocks, use -debug=N for more)\n", maxBlocks)
+				goto done
+			}
+			printBlockDebug(i+1, block)
+			blockCount++
+		}
+		fmt.Println()
+	}
+done:
+
+	// Print summary statistics
+	printDebugSummary(doc)
+}
+
+// printBlockDebug prints detailed info for a single content block
+func printBlockDebug(seq int, block docuindex.ContentBlock) {
+	// Block header with type
+	typeStr := string(block.Type)
+	if block.Semantic.IsHeading {
+		typeStr = fmt.Sprintf("heading (level %d)", block.Semantic.HeadingLevel)
+	}
+	fmt.Printf("\n[Block %d] %s\n", seq, typeStr)
+
+	// Content (full, not truncated)
+	if block.Type != docuindex.BlockTypeImage {
+		fmt.Printf("  Content: %s\n", block.Content)
+	} else {
+		fmt.Printf("  Image: %s\n", block.Content)
+	}
+
+	// Font info (if available)
+	if block.Font != nil {
+		style := ""
+		if block.Font.Bold {
+			style += "bold "
+		}
+		if block.Font.Italic {
+			style += "italic "
+		}
+		if style == "" {
+			style = "regular"
+		}
+		fmt.Printf("  Font: %s, %.1fpt, %s\n", block.Font.Name, block.Font.Size, strings.TrimSpace(style))
+	}
+
+	// Position
+	if block.BBox.PageWidth > 0 {
+		xPct, yPct, _, _ := block.BBox.RelativePosition()
+		fmt.Printf("  Position: (%.1f%%, %.1f%%)\n", xPct, yPct)
+	}
+
+	// Section (if in a section)
+	if block.Semantic.Section != "" {
+		fmt.Printf("  Section: %s\n", block.Semantic.Section)
+	}
+}
+
+// printDebugSummary prints summary statistics for the document
+func printDebugSummary(doc *docuindex.Document) {
+	fmt.Println("=== Summary ===")
+
+	// Count by type
+	counts := make(map[docuindex.BlockType]int)
+	sections := make(map[string]bool)
+	totalChars := 0
+
+	for _, block := range doc.Content.Blocks {
+		counts[block.Type]++
+		if block.Semantic.Section != "" {
+			sections[block.Semantic.Section] = true
+		}
+		totalChars += len(block.Content)
+	}
+
+	fmt.Printf("Total blocks: %d\n", len(doc.Content.Blocks))
+	for _, t := range []docuindex.BlockType{
+		docuindex.BlockTypeHeading,
+		docuindex.BlockTypeText,
+		docuindex.BlockTypeList,
+		docuindex.BlockTypeTable,
+		docuindex.BlockTypeImage,
+	} {
+		if counts[t] > 0 {
+			fmt.Printf("  %s: %d\n", t, counts[t])
+		}
+	}
+
+	fmt.Printf("Total characters: %d\n", totalChars)
+	fmt.Printf("Pages: %d\n", doc.Info.PageCount)
+
+	if len(sections) > 0 {
+		sectionList := make([]string, 0, len(sections))
+		for s := range sections {
+			sectionList = append(sectionList, s)
+		}
+		fmt.Printf("Sections detected: %v\n", sectionList)
 	}
 }
 

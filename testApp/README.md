@@ -51,6 +51,12 @@ Used with `search`, `embed`, and `embed-test` commands:
 | `-vector-weight <0-1>` | Weight for vector search in hybrid mode (default: 0.5) |
 | `-keyword-weight <0-1>` | Weight for keyword search in hybrid mode (default: 0.5) |
 
+### Index Flags
+
+| Flag | Description |
+|------|-------------|
+| `-debug [N]` | Show detailed parsing output (default: 20 blocks, or specify count with `-debug=100`) |
+
 ### Common Flags
 
 | Flag | Description |
@@ -93,6 +99,50 @@ Document Info:
 Content Summary:
   Text blocks:  156
   Image blocks: 12
+```
+
+### Index with Debug Output
+
+Use the `-debug` flag to see detailed parsing information (shows first 20 blocks by default):
+
+```bash
+./testApp index -debug /path/to/document.pdf
+./testApp index -debug=100 /path/to/document.pdf  # Show first 100 blocks
+```
+
+Output:
+```
+Indexing PDF: /path/to/document.pdf
+--------------------------------------------------
+Document indexed successfully!
+...
+
+=== DEBUG: Parsed Content ===
+
+--- Page 1 ---
+
+[Block 1] heading (level 1)
+  Content: Introduction to Machine Learning
+  Font: Helvetica-Bold, 18.0pt, bold
+  Position: (10.5%, 5.2%)
+
+[Block 2] text
+  Content: Machine learning is a subset of artificial intelligence...
+  Font: Helvetica, 12.0pt, regular
+  Position: (10.5%, 15.3%)
+  Section: Introduction to Machine Learning
+
+...
+
+=== Summary ===
+Total blocks: 45
+  heading: 8
+  text: 32
+  list: 3
+  image: 2
+Total characters: 12345
+Pages: 5
+Sections detected: [Introduction to Machine Learning Methods Results]
 ```
 
 ### Search Documents

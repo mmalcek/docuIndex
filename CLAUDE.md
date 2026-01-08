@@ -370,13 +370,15 @@ go test -race ./...  # Verify thread safety
 
 ```bash
 cd testApp
-go run main.go index /path/to/file.pdf   # Index PDF
-go run main.go index /path/to/file.docx  # Index DOCX
+go run main.go index /path/to/file.pdf         # Index PDF
+go run main.go index /path/to/file.docx        # Index DOCX
+go run main.go index -debug /path/to/file.pdf  # Index with debug output (20 blocks)
+go run main.go index -debug=100 /path/to/file.pdf  # Debug with 100 blocks
 go run main.go search "query terms"
 go run main.go list
 go run main.go info <doc-id>
-go run main.go full-test /path/to/file.pdf   # Run all tests with PDF
-go run main.go full-test /path/to/file.docx  # Run all tests with DOCX
+go run main.go full-test /path/to/file.pdf     # Run all tests with PDF
+go run main.go full-test /path/to/file.docx    # Run all tests with DOCX
 ```
 
 ## PDF Operators Implemented
