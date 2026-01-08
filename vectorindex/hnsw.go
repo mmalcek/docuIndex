@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"time"
 )
 
 // HNSW implements Hierarchical Navigable Small World graph for approximate nearest neighbor search
@@ -28,6 +29,12 @@ type HNSW struct {
 
 	// Dimension of vectors (set on first insert)
 	dimension int
+
+	// Incremental update tracking
+	isDirty        bool      // Has unsaved changes
+	pendingAdds    int       // Count of nodes added since last save
+	pendingDeletes int       // Count of nodes deleted since last save
+	lastSaveTime   time.Time // When index was last saved
 }
 
 // node represents a point in the graph
@@ -161,6 +168,10 @@ func (h *HNSW) Add(id string, vector []float32) error {
 		h.maxLevel = level
 	}
 
+	// Track change
+	h.isDirty = true
+	h.pendingAdds++
+
 	return nil
 }
 
@@ -203,6 +214,10 @@ func (h *HNSW) Delete(id string) error {
 			h.maxLevel = maxLevel
 		}
 	}
+
+	// Track change
+	h.isDirty = true
+	h.pendingDeletes++
 
 	return nil
 }
@@ -252,6 +267,50 @@ func (h *HNSW) Size() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.nodes)
+}
+
+// IsDirty returns true if there are unsaved changes
+func (h *HNSW) IsDirty() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.isDirty
+}
+
+// PendingChanges returns the count of pending adds and deletes
+func (h *HNSW) PendingChanges() (adds, deletes int) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.pendingAdds, h.pendingDeletes
+}
+
+// LastSaveTime returns when the index was last saved
+func (h *HNSW) LastSaveTime() time.Time {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.lastSaveTime
+}
+
+// MarkClean marks the index as having no pending changes
+func (h *HNSW) MarkClean() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.isDirty = false
+	h.pendingAdds = 0
+	h.pendingDeletes = 0
+	h.lastSaveTime = time.Now()
+}
+
+// SaveIfDirty saves the index only if there are pending changes
+func (h *HNSW) SaveIfDirty(path string) error {
+	h.mu.RLock()
+	dirty := h.isDirty
+	h.mu.RUnlock()
+
+	if !dirty {
+		return nil
+	}
+
+	return h.SaveToFile(path)
 }
 
 // searchLayer searches for nearest neighbors at a specific layer
@@ -374,8 +433,8 @@ func (h *HNSW) randomLevel() int {
 
 // SaveToFile persists the index to a file
 func (h *HNSW) SaveToFile(path string) error {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 
 	f, err := os.Create(path)
 	if err != nil {
@@ -383,7 +442,17 @@ func (h *HNSW) SaveToFile(path string) error {
 	}
 	defer f.Close()
 
-	return h.writeTo(f)
+	if err := h.writeTo(f); err != nil {
+		return err
+	}
+
+	// Mark clean after successful save
+	h.isDirty = false
+	h.pendingAdds = 0
+	h.pendingDeletes = 0
+	h.lastSaveTime = time.Now()
+
+	return nil
 }
 
 // LoadFromFile loads the index from a file

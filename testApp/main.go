@@ -76,6 +76,12 @@ func main() {
 		runEmbedTestCommand(os.Args[2:])
 	case "images":
 		runImagesCommand(os.Args[2:])
+	case "check-dup":
+		runCheckDupCommand(os.Args[2:])
+	case "search-agent":
+		runSearchAgentCommand(os.Args[2:])
+	case "detect-intent":
+		runDetectIntentCommand(os.Args[2:])
 	default:
 		fmt.Printf("Unknown command: %s\n", command)
 		printUsage()
@@ -89,6 +95,7 @@ func printUsage() {
 	fmt.Println("Commands:")
 	fmt.Println("  index <file>              Index a document (PDF or DOCX)")
 	fmt.Println("  search <query>            Search indexed documents")
+	fmt.Println("  search-agent <query>      Agent-friendly search with structured output")
 	fmt.Println("  list                      List all indexed documents")
 	fmt.Println("  info <doc_id>             Show document information")
 	fmt.Println("  delete <doc_id>           Delete a document from the store")
@@ -98,6 +105,8 @@ func printUsage() {
 	fmt.Println("  embed <doc_id>            Generate embeddings for a document")
 	fmt.Println("  embed-test                Test embedding provider connection")
 	fmt.Println("  images                    List images in a document or section")
+	fmt.Println("  check-dup <file>          Check if document is a duplicate")
+	fmt.Println("  detect-intent <query>     Detect query intent type")
 	fmt.Println()
 	fmt.Println("Embedding Flags (for search, embed commands):")
 	fmt.Println("  -provider <name>          Embedding provider: azure, openai, ollama")
@@ -111,15 +120,23 @@ func printUsage() {
 	fmt.Println("  -vector-weight <0-1>      Weight for vector search in hybrid mode (default: 0.5)")
 	fmt.Println("  -keyword-weight <0-1>     Weight for keyword search in hybrid mode (default: 0.5)")
 	fmt.Println()
+	fmt.Println("Index Flags:")
+	fmt.Println("  -progress                 Show progress during indexing")
+	fmt.Println("  -debug [N]                Show detailed parsing output (default 20 blocks)")
+	fmt.Println()
 	fmt.Println("Common Flags:")
 	fmt.Println("  -data <dir>               Data directory (default: ./test_data)")
 	fmt.Println()
 	fmt.Println("Examples:")
 	fmt.Println("  testApp index document.pdf")
+	fmt.Println("  testApp index -progress large_document.pdf")
 	fmt.Println("  testApp search \"machine learning\"")
+	fmt.Println("  testApp search-agent \"what is machine learning\"")
 	fmt.Println("  testApp search -mode=hybrid -provider=ollama -model=nomic-embed-text \"AI concepts\"")
 	fmt.Println("  testApp embed -provider=openai -api-key=$OPENAI_API_KEY -model=text-embedding-3-small <doc_id>")
 	fmt.Println("  testApp embed-test -provider=ollama -endpoint=http://localhost:11434 -model=nomic-embed-text")
+	fmt.Println("  testApp check-dup document.pdf")
+	fmt.Println("  testApp detect-intent \"summarize the document\"")
 	fmt.Println()
 	fmt.Println("Supported formats: PDF, DOCX")
 }
@@ -257,6 +274,7 @@ func preprocessDebugFlag(args []string) []string {
 func runIndexCommand(args []string) {
 	fs := flag.NewFlagSet("index", flag.ExitOnError)
 	debugBlocks := fs.Int("debug", 0, "Show detailed parsing output (default 20 blocks, or specify count)")
+	showProgress := fs.Bool("progress", false, "Show progress during indexing")
 	addCommonFlags(fs)
 
 	// Pre-process args to handle "-debug 200" as "-debug=200"
@@ -292,7 +310,31 @@ func runIndexCommand(args []string) {
 	}
 	defer store.Close()
 
-	doc, err := store.IndexDocument(filePath)
+	var doc *docuindex.Document
+
+	if *showProgress {
+		// Use progress callback
+		callback := func(p docuindex.IndexProgress) {
+			switch p.Status {
+			case "parsing":
+				fmt.Printf("  [%s] Parsing document...\n", p.Status)
+			case "extracting":
+				fmt.Printf("  [%s] Extracting content (pages: %d)...\n", p.Status, p.TotalPages)
+			case "indexing":
+				fmt.Printf("  [%s] Indexing %d blocks...\n", p.Status, p.TotalBlocks)
+			case "embedding":
+				fmt.Printf("  [%s] Generating embeddings (%d/%d)...\n", p.Status, p.ProcessedBlocks, p.TotalBlocks)
+			case "complete":
+				fmt.Printf("  [%s] Done in %v\n", p.Status, p.ElapsedTime)
+			case "error":
+				fmt.Printf("  [%s] Error: %v\n", p.Status, p.Error)
+			}
+		}
+		doc, err = store.IndexDocumentWithProgress(filePath, callback)
+	} else {
+		doc, err = store.IndexDocument(filePath)
+	}
+
 	if err != nil {
 		if docuindex.IsParseError(err) {
 			log.Fatalf("PDF Parse Error: %v", err)
@@ -1176,4 +1218,186 @@ func findDocumentFiles(dir string) ([]string, error) {
 		return nil
 	})
 	return docs, err
+}
+
+func runCheckDupCommand(args []string) {
+	fs := flag.NewFlagSet("check-dup", flag.ExitOnError)
+	addCommonFlags(fs)
+	fs.Parse(args)
+
+	if fs.NArg() < 1 {
+		fmt.Println("Error: Please provide a document file path")
+		fmt.Println("Usage: testApp check-dup [flags] <file>")
+		os.Exit(1)
+	}
+
+	filePath := fs.Arg(0)
+	fmt.Printf("Checking for duplicates: %s\n", filePath)
+	fmt.Println(strings.Repeat("-", 50))
+
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		log.Fatalf("Error: File not found: %s", filePath)
+	}
+
+	store, err := createStore()
+	if err != nil {
+		log.Fatalf("Error creating store: %v", err)
+	}
+	defer store.Close()
+
+	result, err := store.CheckDuplicate(filePath)
+	if err != nil {
+		log.Fatalf("Error checking for duplicates: %v", err)
+	}
+
+	if result.IsDuplicate {
+		fmt.Println("DUPLICATE FOUND!")
+		fmt.Printf("  Existing ID:   %s\n", result.ExistingID)
+		fmt.Printf("  Existing Name: %s\n", result.ExistingName)
+		fmt.Printf("  Method:        %s\n", result.Method)
+		fmt.Printf("  Similarity:    %.0f%%\n", result.Similarity*100)
+	} else {
+		fmt.Println("No duplicates found. This document is unique.")
+	}
+}
+
+func runSearchAgentCommand(args []string) {
+	fs := flag.NewFlagSet("search-agent", flag.ExitOnError)
+	showChunks := fs.Bool("chunks", false, "Show chunked results for LLM context")
+	maxTokens := fs.Int("max-tokens", 2048, "Maximum tokens per response")
+	addCommonFlags(fs)
+	addEmbeddingFlags(fs)
+	addSearchFlags(fs)
+	fs.Parse(args)
+
+	if fs.NArg() < 1 {
+		fmt.Println("Error: Please provide a search query")
+		fmt.Println("Usage: testApp search-agent [flags] <query>")
+		os.Exit(1)
+	}
+
+	query := strings.Join(fs.Args(), " ")
+	fmt.Printf("Agent Search: \"%s\"\n", query)
+	fmt.Println(strings.Repeat("-", 50))
+
+	store, err := createStore()
+	if err != nil {
+		log.Fatalf("Error creating store: %v", err)
+	}
+	defer store.Close()
+
+	// Configure embedding provider for semantic/hybrid search
+	if searchMode == "semantic" || searchMode == "hybrid" {
+		if embeddingProvider != "" {
+			provider, err := createEmbeddingProvider()
+			if err != nil {
+				log.Fatalf("Error creating embedding provider: %v", err)
+			}
+			store.SetEmbeddingProvider(provider)
+		}
+	}
+
+	// Build search options
+	var searchOpts []docuindex.SearchOption
+	searchOpts = append(searchOpts, docuindex.WithMaxResults(maxResults))
+	searchOpts = append(searchOpts, docuindex.WithContextWindow(2))
+
+	switch searchMode {
+	case "keyword":
+		searchOpts = append(searchOpts, docuindex.WithSearchMode(docuindex.SearchModeKeyword))
+	case "semantic":
+		searchOpts = append(searchOpts, docuindex.WithSearchMode(docuindex.SearchModeSemantic))
+	case "hybrid":
+		searchOpts = append(searchOpts, docuindex.WithSearchMode(docuindex.SearchModeHybrid))
+		searchOpts = append(searchOpts, docuindex.WithVectorWeight(vectorWeight))
+		searchOpts = append(searchOpts, docuindex.WithKeywordWeight(keywordWeight))
+	}
+
+	results, err := store.SearchForAgent(query, searchOpts...)
+	if err != nil {
+		log.Fatalf("Error searching: %v", err)
+	}
+
+	fmt.Printf("Query Type:       %s\n", results.QueryType)
+	fmt.Printf("Total Hits:       %d\n", results.TotalHits)
+	fmt.Printf("Estimated Tokens: %d\n", results.EstimatedTokens)
+	fmt.Printf("Search Time:      %v\n", results.SearchTime)
+	fmt.Println()
+
+	if results.TotalHits == 0 {
+		fmt.Println("No results found.")
+		return
+	}
+
+	if *showChunks {
+		// Chunk results to fit within token limit
+		chunks := docuindex.ChunkSearchResults(convertAgentResults(results.Results), *maxTokens)
+		fmt.Printf("Results chunked into %d groups (max %d tokens each)\n\n", len(chunks), *maxTokens)
+
+		for i, chunk := range chunks {
+			chunkTokens := 0
+			for _, r := range chunk {
+				chunkTokens += docuindex.EstimateTokens(r.Content)
+			}
+			fmt.Printf("=== Chunk %d (%d results, ~%d tokens) ===\n", i+1, len(chunk), chunkTokens)
+			for _, r := range chunk {
+				fmt.Printf("  - %s (page %d)\n", truncateString(r.Content, 60), r.Page)
+			}
+			fmt.Println()
+		}
+	} else {
+		for i, result := range results.Results {
+			fmt.Printf("Result %s (Score: %.4f, ~%d tokens)\n", result.CitationRef, result.Score, result.TokenCount)
+			fmt.Printf("  Document: %s\n", result.DocumentName)
+			fmt.Printf("  Page:     %d\n", result.Page)
+			if result.Section != "" {
+				fmt.Printf("  Section:  %s\n", result.Section)
+			}
+			fmt.Printf("  Content:  %s\n", truncateString(result.Content, 100))
+			if i < len(results.Results)-1 {
+				fmt.Println()
+			}
+		}
+	}
+}
+
+// convertAgentResults converts AgentSearchResult to SearchResult for chunking
+func convertAgentResults(results []docuindex.AgentSearchResult) []docuindex.SearchResult {
+	out := make([]docuindex.SearchResult, len(results))
+	for i, r := range results {
+		out[i] = docuindex.SearchResult{
+			DocumentID:   r.DocumentID,
+			DocumentName: r.DocumentName,
+			BlockID:      r.BlockID,
+			Content:      r.Content,
+			Snippet:      r.Snippet,
+			Score:        r.Score,
+			Page:         r.Page,
+			Section:      r.Section,
+		}
+	}
+	return out
+}
+
+func runDetectIntentCommand(args []string) {
+	fs := flag.NewFlagSet("detect-intent", flag.ExitOnError)
+	fs.Parse(args)
+
+	if fs.NArg() < 1 {
+		fmt.Println("Error: Please provide a query")
+		fmt.Println("Usage: testApp detect-intent <query>")
+		os.Exit(1)
+	}
+
+	query := strings.Join(fs.Args(), " ")
+	fmt.Printf("Query: \"%s\"\n", query)
+	fmt.Println(strings.Repeat("-", 50))
+
+	queryType := docuindex.DetectQueryType(query)
+	description := docuindex.QueryTypeDescription(queryType)
+	suggestedMode := docuindex.SuggestedSearchMode(queryType)
+
+	fmt.Printf("Detected Intent:    %s\n", queryType)
+	fmt.Printf("Description:        %s\n", description)
+	fmt.Printf("Suggested Mode:     %s\n", suggestedMode)
 }

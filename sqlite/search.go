@@ -41,6 +41,20 @@ type SearchOptions struct {
 	HighlightPost string
 	DocumentIDs   []string // Filter to specific documents
 	PageRange     [2]int   // Filter to page range [start, end]
+	Filter        *FilterConfig
+}
+
+// FilterConfig represents advanced filter options from Filter DSL
+type FilterConfig struct {
+	Sources       []string
+	Formats       []string
+	Tags          map[string]string
+	DateStart     time.Time
+	DateEnd       time.Time
+	MinPageCount  int
+	MaxPageCount  int
+	HasEmbeddings *bool
+	ExternalIDs   []string
 }
 
 // DefaultSearchOptions returns default search options
@@ -152,6 +166,24 @@ func (s *Store) Search(query string, opts *SearchOptions) (*SearchResults, error
 	start := time.Now()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	// Apply filter to get allowed document IDs
+	if opts.Filter != nil {
+		filteredIDs, err := s.applyFilter(opts.Filter)
+		if err != nil {
+			return nil, fmt.Errorf("apply filter: %w", err)
+		}
+		if len(filteredIDs) == 0 {
+			// No documents match filter
+			return &SearchResults{Query: query, SearchTime: time.Since(start)}, nil
+		}
+		// Merge with existing document IDs filter
+		if len(opts.DocumentIDs) > 0 {
+			opts.DocumentIDs = intersectStringSlices(opts.DocumentIDs, filteredIDs)
+		} else {
+			opts.DocumentIDs = filteredIDs
+		}
+	}
 
 	// Parse and tokenize query
 	queryTerms := tokenizeQuery(query, s.config.UseStemming, s.config.UseStopWords)
@@ -546,4 +578,175 @@ func contains(slice []string, val string) bool {
 		}
 	}
 	return false
+}
+
+// intersectStringSlices returns the intersection of two string slices
+func intersectStringSlices(a, b []string) []string {
+	set := make(map[string]bool)
+	for _, s := range a {
+		set[s] = true
+	}
+	var result []string
+	for _, s := range b {
+		if set[s] {
+			result = append(result, s)
+		}
+	}
+	return result
+}
+
+// applyFilter applies filter configuration and returns matching document IDs
+func (s *Store) applyFilter(filter *FilterConfig) ([]string, error) {
+	if filter == nil {
+		return nil, nil
+	}
+
+	// Build dynamic WHERE clause
+	var conditions []string
+	var args []interface{}
+
+	// Filter by sources (source field or format field)
+	if len(filter.Sources) > 0 {
+		placeholders := make([]string, len(filter.Sources))
+		for i, src := range filter.Sources {
+			placeholders[i] = "?"
+			args = append(args, src)
+		}
+		// Match either source or format
+		conditions = append(conditions,
+			fmt.Sprintf("(source IN (%s) OR format IN (%s))",
+				strings.Join(placeholders, ","),
+				strings.Join(placeholders, ",")))
+		// Duplicate args for format
+		for _, src := range filter.Sources {
+			args = append(args, src)
+		}
+	}
+
+	// Filter by formats only
+	if len(filter.Formats) > 0 {
+		placeholders := make([]string, len(filter.Formats))
+		for i, fmt := range filter.Formats {
+			placeholders[i] = "?"
+			args = append(args, fmt)
+		}
+		conditions = append(conditions, fmt.Sprintf("format IN (%s)", strings.Join(placeholders, ",")))
+	}
+
+	// Filter by date range
+	if !filter.DateStart.IsZero() {
+		conditions = append(conditions, "created_at >= ?")
+		args = append(args, filter.DateStart.Format(time.RFC3339))
+	}
+	if !filter.DateEnd.IsZero() {
+		conditions = append(conditions, "created_at <= ?")
+		args = append(args, filter.DateEnd.Format(time.RFC3339))
+	}
+
+	// Filter by page count
+	if filter.MinPageCount > 0 {
+		conditions = append(conditions, "page_count >= ?")
+		args = append(args, filter.MinPageCount)
+	}
+	if filter.MaxPageCount > 0 {
+		conditions = append(conditions, "page_count <= ?")
+		args = append(args, filter.MaxPageCount)
+	}
+
+	// Filter by external IDs
+	if len(filter.ExternalIDs) > 0 {
+		placeholders := make([]string, len(filter.ExternalIDs))
+		for i, id := range filter.ExternalIDs {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		conditions = append(conditions, fmt.Sprintf("external_id IN (%s)", strings.Join(placeholders, ",")))
+	}
+
+	// Build query
+	query := "SELECT id FROM documents"
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("filter query: %w", err)
+	}
+	defer rows.Close()
+
+	var docIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		docIDs = append(docIDs, id)
+	}
+
+	// Apply tag filter if specified (requires join with document_tags)
+	if len(filter.Tags) > 0 {
+		docIDs, err = s.filterByTags(docIDs, filter.Tags)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Apply embeddings filter if specified
+	if filter.HasEmbeddings != nil {
+		docIDs, err = s.filterByEmbeddings(docIDs, *filter.HasEmbeddings)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return docIDs, nil
+}
+
+// filterByTags filters document IDs by tags (AND logic)
+func (s *Store) filterByTags(docIDs []string, tags map[string]string) ([]string, error) {
+	if len(tags) == 0 {
+		return docIDs, nil
+	}
+
+	var result []string
+	for _, docID := range docIDs {
+		match := true
+		for key, value := range tags {
+			var count int
+			err := s.db.QueryRow(`
+				SELECT COUNT(*) FROM document_tags
+				WHERE document_id = ? AND tag_key = ? AND tag_value = ?
+			`, docID, key, value).Scan(&count)
+			if err != nil || count == 0 {
+				match = false
+				break
+			}
+		}
+		if match {
+			result = append(result, docID)
+		}
+	}
+	return result, nil
+}
+
+// filterByEmbeddings filters document IDs by embedding presence
+func (s *Store) filterByEmbeddings(docIDs []string, hasEmbeddings bool) ([]string, error) {
+	var result []string
+	for _, docID := range docIDs {
+		var count int
+		err := s.db.QueryRow(`
+			SELECT COUNT(*) FROM vectors WHERE document_id = ?
+		`, docID).Scan(&count)
+		if err != nil {
+			continue
+		}
+
+		if hasEmbeddings && count > 0 {
+			result = append(result, docID)
+		} else if !hasEmbeddings && count == 0 {
+			result = append(result, docID)
+		}
+	}
+	return result, nil
 }

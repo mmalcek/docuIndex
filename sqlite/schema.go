@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 // Schema SQL statements
 const schemaSQL = `
@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS documents (
     size_bytes INTEGER,
     page_count INTEGER,
     checksum TEXT,
+    content_hash TEXT DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     source TEXT DEFAULT '',
@@ -134,6 +135,8 @@ CREATE INDEX IF NOT EXISTS idx_images_document ON images(document_id);
 CREATE INDEX IF NOT EXISTS idx_tags_key_value ON document_tags(tag_key, tag_value);
 CREATE INDEX IF NOT EXISTS idx_documents_source ON documents(source);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_source_external ON documents(source, external_id) WHERE external_id != '';
+CREATE INDEX IF NOT EXISTS idx_documents_checksum ON documents(checksum) WHERE checksum != '';
+CREATE INDEX IF NOT EXISTS idx_documents_content_hash ON documents(content_hash) WHERE content_hash != '';
 `
 
 // initSchema creates the database schema
@@ -220,8 +223,7 @@ func setSchemaVersion(db *sql.DB, version int) error {
 func runMigrations(db *sql.DB, oldVersion int) error {
 	// Migration functions by version
 	migrations := map[int]func(*sql.DB) error{
-		// Add migrations here as schema evolves
-		// 2: migrateV1ToV2,
+		2: migrateV1ToV2,
 	}
 
 	for v := oldVersion + 1; v <= currentSchemaVersion; v++ {
@@ -234,6 +236,29 @@ func runMigrations(db *sql.DB, oldVersion int) error {
 		if err := setSchemaVersion(db, v); err != nil {
 			return err
 		}
+	}
+
+	return nil
+}
+
+// migrateV1ToV2 adds content_hash column for deduplication
+func migrateV1ToV2(db *sql.DB) error {
+	// Add content_hash column
+	_, err := db.Exec(`ALTER TABLE documents ADD COLUMN content_hash TEXT DEFAULT ''`)
+	if err != nil {
+		return fmt.Errorf("add content_hash column: %w", err)
+	}
+
+	// Create index for content_hash
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_documents_content_hash ON documents(content_hash) WHERE content_hash != ''`)
+	if err != nil {
+		return fmt.Errorf("create content_hash index: %w", err)
+	}
+
+	// Create index for checksum if not exists
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_documents_checksum ON documents(checksum) WHERE checksum != ''`)
+	if err != nil {
+		return fmt.Errorf("create checksum index: %w", err)
 	}
 
 	return nil

@@ -14,6 +14,7 @@ type storeConfig struct {
 	ExtractImages    bool // Extract images from documents
 	ExtractSemantics bool // Perform semantic analysis
 	ComputeChecksum  bool // Compute document checksums
+	EnableDedupCheck bool // Check for duplicates before indexing
 
 	// Search settings
 	EnableStemming  bool // Enable Porter stemming
@@ -101,6 +102,13 @@ func WithNGrams(enabled bool, size int) StoreOption {
 	}
 }
 
+// WithDedupCheck enables duplicate detection before indexing
+func WithDedupCheck(enabled bool) StoreOption {
+	return func(c *storeConfig) {
+		c.EnableDedupCheck = enabled
+	}
+}
+
 // SearchOption configures search behavior
 type SearchOption func(*searchConfig)
 
@@ -119,6 +127,13 @@ type searchConfig struct {
 	KeywordWeight float64           // Weight for keyword search in hybrid mode
 	Sources       []string          // Filter by source or format (e.g., "pdf", "crm")
 	Tags          map[string]string // Filter by tags (AND logic)
+
+	// Agent-friendly output options
+	AgentOutput    bool        // Return AgentSearchResponse format
+	EstimateTokens bool        // Include token count estimates
+	IncludeCitations bool      // Add citation references [1], [2], etc.
+	ChunkOptions   *ChunkOptions // Chunking options for results
+	Filter         *Filter       // Advanced filter DSL
 }
 
 func defaultSearchConfig() *searchConfig {
@@ -200,9 +215,10 @@ func WithImages(include bool) SearchOption {
 type IndexOption func(*indexConfig)
 
 type indexConfig struct {
-	ForceReindex bool   // Re-index even if document exists
-	SourcePath   string // Original file path for metadata
-	Name         string // Override document name
+	ForceReindex     bool             // Re-index even if document exists
+	SourcePath       string           // Original file path for metadata
+	Name             string           // Override document name
+	ProgressCallback ProgressCallback // Callback for progress updates
 }
 
 func defaultIndexConfig() *indexConfig {
@@ -229,6 +245,13 @@ func WithSourcePath(path string) IndexOption {
 func WithName(name string) IndexOption {
 	return func(c *indexConfig) {
 		c.Name = name
+	}
+}
+
+// WithProgressCallback sets a callback for progress updates during indexing
+func WithProgressCallback(fn ProgressCallback) IndexOption {
+	return func(c *indexConfig) {
+		c.ProgressCallback = fn
 	}
 }
 
@@ -280,5 +303,40 @@ func WithSources(sources ...string) SearchOption {
 func WithTags(tags map[string]string) SearchOption {
 	return func(c *searchConfig) {
 		c.Tags = tags
+	}
+}
+
+// WithAgentOutput enables agent-friendly output format
+func WithAgentOutput(enabled bool) SearchOption {
+	return func(c *searchConfig) {
+		c.AgentOutput = enabled
+	}
+}
+
+// WithEstimateTokens includes token count estimates in results
+func WithEstimateTokens(enabled bool) SearchOption {
+	return func(c *searchConfig) {
+		c.EstimateTokens = enabled
+	}
+}
+
+// WithCitations adds citation references [1], [2], etc. to results
+func WithCitations(enabled bool) SearchOption {
+	return func(c *searchConfig) {
+		c.IncludeCitations = enabled
+	}
+}
+
+// WithChunking configures result chunking for LLM context windows
+func WithChunking(opts ChunkOptions) SearchOption {
+	return func(c *searchConfig) {
+		c.ChunkOptions = &opts
+	}
+}
+
+// WithFilter applies an advanced filter DSL
+func WithFilter(f *Filter) SearchOption {
+	return func(c *searchConfig) {
+		c.Filter = f
 	}
 }

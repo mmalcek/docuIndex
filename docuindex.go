@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mariomalcek/docuindex/docx"
 	"github.com/mariomalcek/docuindex/embedding"
 	"github.com/mariomalcek/docuindex/pdf"
@@ -868,10 +869,12 @@ func (s *Store) DeleteDocument(id string) error {
 		return err
 	}
 
-	// Persist HNSW index
-	if s.hnsw != nil {
+	// Persist HNSW index - now properly handles errors
+	if s.hnsw != nil && s.hnsw.IsDirty() {
 		hnswPath := filepath.Join(s.config.BasePath, "hnsw.idx")
-		s.hnsw.SaveToFile(hnswPath)
+		if err := s.hnsw.SaveToFile(hnswPath); err != nil {
+			return fmt.Errorf("save HNSW index: %w", err)
+		}
 	}
 
 	return nil
@@ -1216,6 +1219,621 @@ func (s *Store) HasEmbeddings(docID string) (bool, error) {
 	return count > 0, nil
 }
 
+// DetectQueryType analyzes a query string and returns its detected intent type
+func (s *Store) DetectQueryType(query string) QueryType {
+	return DetectQueryType(query)
+}
+
+// CheckDuplicate checks if a document at the given path is a duplicate of an existing document.
+// It uses file checksum for comparison.
+func (s *Store) CheckDuplicate(path string) (*DedupResult, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Compute checksum
+	checksum, err := computeChecksum(path)
+	if err != nil {
+		return nil, fmt.Errorf("compute checksum: %w", err)
+	}
+
+	// Check for duplicate by checksum
+	dedupInfo, err := s.db.CheckDuplicateByChecksum(checksum)
+	if err != nil {
+		return nil, fmt.Errorf("check duplicate: %w", err)
+	}
+
+	return &DedupResult{
+		IsDuplicate:  dedupInfo.IsDuplicate,
+		ExistingID:   dedupInfo.ExistingID,
+		ExistingName: dedupInfo.ExistingName,
+		Similarity:   1.0, // Exact match if duplicate
+		Method:       dedupInfo.Method,
+	}, nil
+}
+
+// CheckDuplicateByContent checks if content already exists in the store.
+// It computes a content hash from the provided data and checks for matches.
+func (s *Store) CheckDuplicateByContent(data []byte) (*DedupResult, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Compute content hash
+	hash := sha256.Sum256(data)
+	contentHash := fmt.Sprintf("sha256:%x", hash)
+
+	// Check for duplicate by content hash
+	dedupInfo, err := s.db.CheckDuplicateByContentHash(contentHash)
+	if err != nil {
+		return nil, fmt.Errorf("check duplicate: %w", err)
+	}
+
+	return &DedupResult{
+		IsDuplicate:  dedupInfo.IsDuplicate,
+		ExistingID:   dedupInfo.ExistingID,
+		ExistingName: dedupInfo.ExistingName,
+		Similarity:   1.0, // Exact match if duplicate
+		Method:       dedupInfo.Method,
+	}, nil
+}
+
+// IndexDocumentWithProgress indexes a document with progress callbacks
+func (s *Store) IndexDocumentWithProgress(path string, callback ProgressCallback, opts ...IndexOption) (*Document, error) {
+	if callback == nil {
+		// Fall back to regular indexing if no callback
+		return s.IndexDocument(path, opts...)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	config := defaultIndexConfig()
+	config.SourcePath = path
+	config.ProgressCallback = callback
+
+	for _, opt := range opts {
+		opt(config)
+	}
+
+	startTime := time.Now()
+	name := filepath.Base(path)
+	if config.Name != "" {
+		name = config.Name
+	}
+
+	// Initial progress
+	progress := IndexProgress{
+		DocumentName: name,
+		Status:       "parsing",
+		StartTime:    startTime,
+	}
+	callback(progress)
+
+	// Detect format
+	ext := strings.ToLower(filepath.Ext(path))
+	var doc *Document
+	var pendingImages []pendingImage
+	var err error
+
+	switch ext {
+	case ".pdf":
+		doc, pendingImages, err = s.indexPDFWithProgress(path, config, callback, startTime)
+	case ".docx":
+		doc, pendingImages, err = s.indexDOCXWithProgress(path, config, callback, startTime)
+	default:
+		progress.Status = "error"
+		progress.Error = fmt.Errorf("unsupported file format: %s", ext)
+		progress.ElapsedTime = time.Since(startTime)
+		callback(progress)
+		return nil, progress.Error
+	}
+
+	if err != nil {
+		progress.Status = "error"
+		progress.Error = err
+		progress.ElapsedTime = time.Since(startTime)
+		callback(progress)
+		return nil, err
+	}
+
+	// Indexing phase
+	progress = IndexProgress{
+		DocumentID:   doc.Info.ID,
+		DocumentName: name,
+		Status:       "indexing",
+		TotalPages:   doc.Info.PageCount,
+		TotalBlocks:  len(doc.Content.Blocks),
+		StartTime:    startTime,
+		ElapsedTime:  time.Since(startTime),
+	}
+	callback(progress)
+
+	// Save to SQLite
+	if err := s.db.SaveDocument(toSQLiteDocument(doc)); err != nil {
+		progress.Status = "error"
+		progress.Error = fmt.Errorf("save document: %w", err)
+		progress.ElapsedTime = time.Since(startTime)
+		callback(progress)
+		return nil, progress.Error
+	}
+
+	// Save images
+	for _, img := range pendingImages {
+		blockID := ""
+		if img.BlockIndex >= 0 && img.BlockIndex < len(doc.Content.Blocks) {
+			blockID = doc.Content.Blocks[img.BlockIndex].ID
+		}
+		imageID, err := s.db.SaveImage(doc.Info.ID, img.Data, img.Format, img.Width, img.Height, img.Page, img.Name, blockID)
+		if err != nil {
+			continue
+		}
+		if img.BlockIndex >= 0 && img.BlockIndex < len(doc.Content.Blocks) {
+			doc.Content.Blocks[img.BlockIndex].Content = fmt.Sprintf("images/%s", imageID)
+		}
+	}
+
+	// Index for BM25 search
+	blocks := toSQLiteBlocks(doc)
+	if err := s.db.IndexDocument(doc.Info.ID, blocks); err != nil {
+		progress.Status = "error"
+		progress.Error = fmt.Errorf("index document: %w", err)
+		progress.ElapsedTime = time.Since(startTime)
+		callback(progress)
+		return nil, progress.Error
+	}
+
+	// Embedding phase
+	if s.embedder != nil {
+		progress.Status = "embedding"
+		progress.ElapsedTime = time.Since(startTime)
+		callback(progress)
+
+		if err := s.embedDocumentWithProgress(doc, callback, startTime); err != nil {
+			// Log but don't fail
+			fmt.Printf("warning: embedding failed: %v\n", err)
+		}
+	}
+
+	// Complete
+	progress = IndexProgress{
+		DocumentID:      doc.Info.ID,
+		DocumentName:    name,
+		Status:          "complete",
+		TotalPages:      doc.Info.PageCount,
+		ProcessedPages:  doc.Info.PageCount,
+		TotalBlocks:     len(doc.Content.Blocks),
+		ProcessedBlocks: len(doc.Content.Blocks),
+		StartTime:       startTime,
+		ElapsedTime:     time.Since(startTime),
+	}
+	callback(progress)
+
+	return doc, nil
+}
+
+// indexPDFWithProgress indexes a PDF with progress callbacks
+func (s *Store) indexPDFWithProgress(path string, config *indexConfig, callback ProgressCallback, startTime time.Time) (*Document, []pendingImage, error) {
+	pdfDoc, err := pdf.Open(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open PDF: %w", err)
+	}
+	defer pdfDoc.Close()
+
+	if pdfDoc.IsEncrypted() {
+		return nil, nil, ErrEncryptedPDF
+	}
+
+	docID := generateID()
+	pageCount, _ := pdfDoc.PageCount()
+
+	// Progress: extracting
+	progress := IndexProgress{
+		DocumentID:   docID,
+		DocumentName: filepath.Base(path),
+		Status:       "extracting",
+		TotalPages:   pageCount,
+		StartTime:    startTime,
+		ElapsedTime:  time.Since(startTime),
+	}
+	callback(progress)
+
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("stat file: %w", err)
+	}
+
+	var checksum string
+	if s.config.ComputeChecksum {
+		checksum, _ = computeChecksum(path)
+	}
+
+	extractor := pdf.NewSemanticExtractor(pdfDoc)
+	pdfContent, err := extractor.ExtractContent()
+	if err != nil {
+		return nil, nil, fmt.Errorf("extract content: %w", err)
+	}
+
+	content := convertPDFContent(pdfContent)
+
+	// Update progress with block count
+	progress.TotalBlocks = len(content.Blocks)
+	progress.ProcessedPages = pageCount
+	progress.ElapsedTime = time.Since(startTime)
+	callback(progress)
+
+	// Collect images
+	var pending []pendingImage
+	if s.config.ExtractImages {
+		imageExtractor := pdf.NewImageExtractor(pdfDoc)
+		for pageNum := 1; pageNum <= pageCount; pageNum++ {
+			images, err := imageExtractor.ExtractPageImages(pageNum)
+			if err != nil {
+				continue
+			}
+
+			for _, img := range images {
+				blockIndex := -1
+				for j := range content.Blocks {
+					if content.Blocks[j].Type == BlockTypeImage &&
+						content.Blocks[j].Content == img.Name &&
+						content.Blocks[j].Page == pageNum {
+						blockIndex = j
+						break
+					}
+				}
+
+				pending = append(pending, pendingImage{
+					Data:       img.Data,
+					Format:     img.Format,
+					Width:      img.Width,
+					Height:     img.Height,
+					Page:       pageNum,
+					Name:       img.Name,
+					BlockIndex: blockIndex,
+				})
+			}
+		}
+	}
+
+	name := filepath.Base(path)
+	if config.Name != "" {
+		name = config.Name
+	}
+
+	doc := &Document{
+		Info: DocumentInfo{
+			ID:           docID,
+			Name:         name,
+			OriginalPath: path,
+			SizeBytes:    fileInfo.Size(),
+			PageCount:    pageCount,
+			Format:       FormatPDF,
+			Checksum:     checksum,
+			CreatedAt:    time.Now(),
+			UpdatedAt:    time.Now(),
+		},
+		Content: content,
+	}
+
+	return doc, pending, nil
+}
+
+// indexDOCXWithProgress indexes a DOCX with progress callbacks
+func (s *Store) indexDOCXWithProgress(path string, config *indexConfig, callback ProgressCallback, startTime time.Time) (*Document, []pendingImage, error) {
+	docxDoc, err := docx.Open(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open DOCX: %w", err)
+	}
+	defer docxDoc.Close()
+
+	docID := generateID()
+	pageCount, _ := docxDoc.PageCount()
+	if pageCount == 0 {
+		pageCount = 1
+	}
+
+	// Progress: extracting
+	progress := IndexProgress{
+		DocumentID:   docID,
+		DocumentName: filepath.Base(path),
+		Status:       "extracting",
+		TotalPages:   pageCount,
+		StartTime:    startTime,
+		ElapsedTime:  time.Since(startTime),
+	}
+	callback(progress)
+
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("stat file: %w", err)
+	}
+
+	var checksum string
+	if s.config.ComputeChecksum {
+		checksum, _ = computeChecksum(path)
+	}
+
+	extractor, err := docx.NewSemanticExtractor(docxDoc)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create extractor: %w", err)
+	}
+
+	docxContent, err := extractor.ExtractContent()
+	if err != nil {
+		return nil, nil, fmt.Errorf("extract content: %w", err)
+	}
+
+	content := convertDOCXContent(docxContent)
+
+	// Update progress with block count
+	progress.TotalBlocks = len(content.Blocks)
+	progress.ProcessedPages = pageCount
+	progress.ElapsedTime = time.Since(startTime)
+	callback(progress)
+
+	// Collect images
+	var pending []pendingImage
+	if s.config.ExtractImages {
+		imageExtractor, err := docx.NewImageExtractor(docxDoc)
+		if err == nil {
+			images, err := imageExtractor.ExtractAllImages()
+			if err == nil {
+				for _, img := range images {
+					blockIndex := -1
+					for j := range content.Blocks {
+						if content.Blocks[j].Type == BlockTypeImage &&
+							content.Blocks[j].Content == img.Name {
+							blockIndex = j
+							break
+						}
+					}
+
+					pending = append(pending, pendingImage{
+						Data:       img.Data,
+						Format:     img.Format,
+						Width:      0,
+						Height:     0,
+						Page:       0,
+						Name:       img.Name,
+						BlockIndex: blockIndex,
+					})
+				}
+			}
+		}
+	}
+
+	name := filepath.Base(path)
+	if config.Name != "" {
+		name = config.Name
+	}
+
+	doc := &Document{
+		Info: DocumentInfo{
+			ID:           docID,
+			Name:         name,
+			OriginalPath: path,
+			SizeBytes:    fileInfo.Size(),
+			PageCount:    pageCount,
+			Format:       FormatDOCX,
+			Checksum:     checksum,
+			CreatedAt:    time.Now(),
+			UpdatedAt:    time.Now(),
+		},
+		Content: content,
+	}
+
+	return doc, pending, nil
+}
+
+// embedDocumentWithProgress generates embeddings with progress callbacks
+func (s *Store) embedDocumentWithProgress(doc *Document, callback ProgressCallback, startTime time.Time) error {
+	ctx := context.Background()
+
+	// Collect text blocks
+	var texts []string
+	var blockIDs []string
+
+	for _, block := range doc.Content.Blocks {
+		if block.Type == BlockTypeText || block.Type == BlockTypeHeading || block.Type == BlockTypeCustom {
+			if len(block.Content) > 0 {
+				texts = append(texts, block.Content)
+				blockIDs = append(blockIDs, block.ID)
+			}
+		}
+	}
+
+	if len(texts) == 0 {
+		return nil
+	}
+
+	progress := IndexProgress{
+		DocumentID:   doc.Info.ID,
+		DocumentName: doc.Info.Name,
+		Status:       "embedding",
+		TotalBlocks:  len(texts),
+		StartTime:    startTime,
+	}
+
+	// Generate embeddings in batches
+	batchSize := s.embedder.MaxBatchSize()
+	var vectors []sqlite.VectorItem
+
+	for i := 0; i < len(texts); i += batchSize {
+		end := i + batchSize
+		if end > len(texts) {
+			end = len(texts)
+		}
+
+		embeddings, err := s.embedder.Embed(ctx, texts[i:end])
+		if err != nil {
+			return fmt.Errorf("embed batch: %w", err)
+		}
+
+		for j, emb := range embeddings {
+			vectors = append(vectors, sqlite.VectorItem{
+				BlockID:    blockIDs[i+j],
+				DocumentID: doc.Info.ID,
+				Vector:     emb,
+				Text:       texts[i+j],
+				Model:      s.embedder.Name(),
+			})
+		}
+
+		// Update progress
+		progress.ProcessedBlocks = len(vectors)
+		progress.ElapsedTime = time.Since(startTime)
+		callback(progress)
+	}
+
+	// Save vectors to SQLite
+	if err := s.db.SaveVectors(doc.Info.ID, vectors); err != nil {
+		return fmt.Errorf("save vectors: %w", err)
+	}
+
+	// Add to HNSW index
+	for _, v := range vectors {
+		id := fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID)
+		s.hnsw.Add(id, v.Vector)
+	}
+
+	// Persist HNSW index
+	hnswPath := filepath.Join(s.config.BasePath, "hnsw.idx")
+	if err := s.hnsw.SaveToFile(hnswPath); err != nil {
+		return fmt.Errorf("save HNSW index: %w", err)
+	}
+
+	return nil
+}
+
+// SearchForAgent performs a search optimized for AI agent consumption.
+// Returns structured output with token estimates, citation references, and chunked results.
+func (s *Store) SearchForAgent(query string, opts ...SearchOption) (*AgentSearchResponse, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	startTime := time.Now()
+
+	config := defaultSearchConfig()
+	config.AgentOutput = true
+	config.EstimateTokens = true
+	config.IncludeCitations = true
+
+	for _, opt := range opts {
+		opt(config)
+	}
+
+	if query == "" {
+		return nil, ErrInvalidQuery
+	}
+
+	// Detect query type
+	queryType := DetectQueryType(query)
+
+	// Resolve document filters from sources and tags
+	var filterDocIDs []string
+
+	if len(config.Sources) > 0 {
+		sourceDocIDs, err := s.db.GetDocumentIDsBySources(config.Sources)
+		if err != nil {
+			return nil, fmt.Errorf("filter by sources: %w", err)
+		}
+		filterDocIDs = sourceDocIDs
+	}
+
+	if len(config.Tags) > 0 {
+		tagDocIDs, err := s.db.GetDocumentIDsByTags(config.Tags)
+		if err != nil {
+			return nil, fmt.Errorf("filter by tags: %w", err)
+		}
+
+		if filterDocIDs != nil {
+			filterDocIDs = intersectStrings(filterDocIDs, tagDocIDs)
+		} else {
+			filterDocIDs = tagDocIDs
+		}
+	}
+
+	if filterDocIDs != nil {
+		if len(config.DocumentIDs) > 0 {
+			filterDocIDs = intersectStrings(filterDocIDs, config.DocumentIDs)
+		}
+		config.DocumentIDs = filterDocIDs
+	}
+
+	// Use hybrid searcher
+	hybridOpts := &hsearch.HybridSearchOptions{
+		Mode:          hsearch.SearchMode(config.SearchMode),
+		MaxResults:    config.MaxResults,
+		MinScore:      config.MinScore,
+		VectorWeight:  config.VectorWeight,
+		KeywordWeight: config.KeywordWeight,
+		Timeout:       30 * time.Second,
+	}
+
+	ctx := context.Background()
+	hybridResults, err := s.hybrid.Search(ctx, query, hybridOpts)
+	if err != nil {
+		return nil, fmt.Errorf("hybrid search: %w", err)
+	}
+
+	// Convert to AgentSearchResults with citations
+	results := make([]AgentSearchResult, len(hybridResults.Results))
+	totalTokens := 0
+
+	for i, r := range hybridResults.Results {
+		tokenCount := EstimateTokens(r.Content)
+		totalTokens += tokenCount
+
+		results[i] = AgentSearchResult{
+			DocumentID:   r.DocumentID,
+			DocumentName: r.DocumentName,
+			BlockID:      r.BlockID,
+			Content:      r.Content,
+			Snippet:      buildSnippet(r.Content, query, config.HighlightPre, config.HighlightPost),
+			Score:        r.FusedScore,
+			Page:         r.Page,
+			Section:      r.Section,
+			CitationRef:  fmt.Sprintf("[%d]", i+1),
+			TokenCount:   tokenCount,
+		}
+
+		// Get context if requested
+		if config.ContextWindow > 0 {
+			ctx, err := s.getContextLocked(r.DocumentID, r.BlockID, config.ContextWindow)
+			if err == nil {
+				results[i].Context = append(ctx.Before, ctx.Center)
+				results[i].Context = append(results[i].Context, ctx.After...)
+
+				// Update token count with context
+				for _, cb := range results[i].Context {
+					results[i].TokenCount += EstimateTokens(cb.Content)
+				}
+				totalTokens += results[i].TokenCount - tokenCount
+			}
+		}
+
+		// Get images if requested
+		if config.IncludeImages && r.Section != "" {
+			images, err := s.db.GetImagesBySection(r.DocumentID, r.Section)
+			if err == nil && len(images) > 0 {
+				imagePaths := make([]string, len(images))
+				for j, img := range images {
+					imagePaths[j] = fmt.Sprintf("images/%s.%s", img.ID, img.Format)
+				}
+				results[i].Images = imagePaths
+			}
+		}
+	}
+
+	return &AgentSearchResponse{
+		Query:           query,
+		QueryType:       queryType,
+		Results:         results,
+		TotalHits:       len(results),
+		SearchTime:      time.Since(startTime),
+		EstimatedTokens: totalTokens,
+	}, nil
+}
+
 // Close releases resources held by the store
 func (s *Store) Close() error {
 	s.mu.Lock()
@@ -1263,9 +1881,7 @@ type StoreStats struct {
 // Helper functions
 
 func generateID() string {
-	now := time.Now().UnixNano()
-	h := sha256.Sum256([]byte(fmt.Sprintf("%d", now)))
-	return fmt.Sprintf("%x", h[:16])
+	return uuid.New().String()
 }
 
 func computeChecksum(path string) (string, error) {

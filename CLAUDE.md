@@ -13,6 +13,10 @@ docuindex/
 ├── types.go            # Core types (ContentBlock, Document, etc.)
 ├── errors.go           # Custom error types
 ├── options.go          # Configuration options
+├── filter.go           # Filter Query DSL for advanced filtering
+├── query.go            # Query intent detection
+├── tokens.go           # Token estimation for LLM context
+├── chunking.go         # LLM-friendly content chunking
 │
 ├── pdf/                # Pure Go PDF parser
 │   ├── lexer.go       # PDF tokenizer
@@ -52,7 +56,8 @@ docuindex/
 │   ├── search.go      # BM25 search on SQLite
 │   ├── vectors.go     # Vector storage as BLOBs
 │   ├── images.go      # Image metadata + file management
-│   └── tags.go        # Document tag operations
+│   ├── tags.go        # Document tag operations
+│   └── dedup.go       # Document deduplication
 │
 ├── embedding/          # Embedding providers
 │   ├── provider.go    # Provider interface + factory
@@ -204,6 +209,16 @@ CREATE TABLE document_tags (
 | `CustomData` | Structured data source with entries, tags, ImportedAt, and ExternalID for upsert |
 | `DataEntry` | Single entry in custom data with content and metadata |
 | `EmbeddingStatus` | Document embedding state (HasEmbeddings, IsComplete, EmbeddedCount, TotalEmbeddable, Model, Dimension, LastUpdated) |
+| `IndexProgress` | Progress tracking for async document indexing (status, pages, blocks, elapsed time) |
+| `ProgressCallback` | Function type for receiving indexing progress updates |
+| `QueryType` | Detected query intent (factual, navigation, summary, comparison, definition, list) |
+| `AgentSearchResponse` | Structured search response for AI agents (with token estimates, citations) |
+| `AgentSearchResult` | Single result with CitationRef, TokenCount, and Context |
+| `DedupResult` | Document deduplication check result (IsDuplicate, ExistingID, Method) |
+| `ChunkOptions` | LLM chunking configuration (MaxTokens, OverlapTokens, ChunkBy) |
+| `Chunk` | A chunked content piece with token count and position |
+| `Filter` | Fluent filter DSL for advanced metadata filtering |
+| `TokenBudget` | Helper for tracking token usage across operations |
 
 ## Public API
 
@@ -302,6 +317,66 @@ status, err := store.GetEmbeddingStatus(docID)  // Detailed status
 // status.Dimension       - vector dimension
 // status.LastUpdated     - when embeddings were last updated
 // status.Progress()      - returns completion percentage (0-100)
+
+// === AI/Agent Integration Features ===
+
+// Index with progress callbacks (async-friendly)
+doc, err := store.IndexDocumentWithProgress(path, func(p docuindex.IndexProgress) {
+    fmt.Printf("[%s] %d/%d blocks\n", p.Status, p.ProcessedBlocks, p.TotalBlocks)
+})
+
+// Check for duplicate documents before indexing
+result, err := store.CheckDuplicate("/path/to/file.pdf")
+if result.IsDuplicate {
+    fmt.Printf("Duplicate of: %s\n", result.ExistingName)
+}
+
+// Check duplicate by content bytes
+result, err := store.CheckDuplicateByContent(fileBytes)
+
+// Agent-friendly search with structured output
+response, err := store.SearchForAgent("what is machine learning",
+    docuindex.WithMaxResults(5),
+)
+// response.QueryType       - detected intent (factual, summary, etc.)
+// response.EstimatedTokens - total tokens in results
+// response.Results[0].CitationRef  - e.g., "[1]"
+// response.Results[0].TokenCount   - tokens in this result
+
+// Detect query intent
+queryType := store.DetectQueryType("summarize the document")
+// Returns: QueryTypeSummary
+
+// Query type utilities
+description := docuindex.QueryTypeDescription(queryType)  // "Summary/overview request"
+searchMode := docuindex.SuggestedSearchMode(queryType)    // SearchModeHybrid
+
+// Token estimation
+tokens := docuindex.EstimateTokens("some text content")
+budget := docuindex.NewTokenBudget(4096)
+budget.AddText("content")
+remaining := budget.Remaining()
+
+// Content chunking for LLM context windows
+chunks := docuindex.ChunkContent(longText, docuindex.ChunkOptions{
+    MaxTokens:     512,
+    OverlapTokens: 50,
+    ChunkBy:       "paragraph",  // or "sentence", "tokens"
+})
+
+// Chunk search results to fit context
+chunkedResults := docuindex.ChunkSearchResults(results, 2048)
+
+// Filter DSL for advanced queries
+filter := docuindex.NewFilter().
+    Sources("pdf", "crm").
+    Formats("pdf").
+    After(time.Now().AddDate(0, -1, 0)).  // Last month
+    MinPages(5).
+    Tag("team", "sales").
+    HasEmbeddings(true)
+
+results, err := store.Search("query", docuindex.WithFilter(filter))
 ```
 
 ## Configuration Options
@@ -315,6 +390,7 @@ docuindex.WithSemanticAnalysis(bool)   // Enable heading/section detection
 docuindex.WithChecksum(bool)           // Compute document checksums
 docuindex.WithStemming(bool)           // Porter stemming (default: true)
 docuindex.WithStopWords(bool)          // Filter stop words (default: true)
+docuindex.WithDedupCheck(bool)         // Enable duplicate detection on indexing
 ```
 
 ### Search Options
@@ -332,6 +408,16 @@ docuindex.WithKeywordWeight(float64)   // Weight for keyword search (0-1)
 docuindex.WithSources(...strings)      // Filter by source or format
 docuindex.WithTags(map[string]string)  // Filter by tags (AND logic)
 docuindex.WithImages(bool)             // Include image paths in results
+docuindex.WithFilter(*Filter)          // Use Filter DSL for advanced filtering
+docuindex.WithAgentOutput(bool)        // Return AgentSearchResponse format
+docuindex.WithEstimateTokens(bool)     // Include token estimates in results
+docuindex.WithCitations(bool)          // Add citation references [1], [2], etc.
+docuindex.WithChunking(ChunkOptions)   // Configure result chunking
+```
+
+### Index Options
+```go
+docuindex.WithProgressCallback(fn)     // Receive indexing progress updates
 ```
 
 ### Embedding Providers
@@ -375,6 +461,7 @@ go run main.go index /path/to/file.pdf         # Index PDF
 go run main.go index /path/to/file.docx        # Index DOCX
 go run main.go index -debug /path/to/file.pdf  # Index with debug output (20 blocks)
 go run main.go index -debug=100 /path/to/file.pdf  # Debug with 100 blocks
+go run main.go index -progress /path/to/file.pdf   # Show progress during indexing
 go run main.go search "query terms"
 go run main.go list
 go run main.go info <doc-id>
@@ -384,6 +471,12 @@ go run main.go search -show-images "query"     # Search with images in results
 go run main.go images -doc <doc-id>            # List all images for document
 go run main.go images -doc <doc-id> -section "Section Name"  # Filter by section
 go run main.go images -doc <doc-id> -page 5    # Filter by page
+
+# AI/Agent integration commands
+go run main.go check-dup /path/to/file.pdf     # Check for duplicate documents
+go run main.go search-agent "what is X"        # Agent-friendly search with citations
+go run main.go search-agent -chunks "query"    # Show chunked results for LLM
+go run main.go detect-intent "summarize this"  # Detect query intent type
 ```
 
 ## PDF Operators Implemented
@@ -493,6 +586,14 @@ go run main.go images -doc <doc-id> -page 5    # Filter by page
 | Check embedding status | `docuindex.go` GetEmbeddingStatus(), HasEmbeddings() |
 | Query images by section/page | `sqlite/images.go` GetImagesBySection(), GetImagesByPage() |
 | Include images in search | `docuindex.go` Search() with WithImages(true) |
+| Index with progress | `docuindex.go` IndexDocumentWithProgress() |
+| Check for duplicates | `docuindex.go` CheckDuplicate(), CheckDuplicateByContent() |
+| Agent-friendly search | `docuindex.go` SearchForAgent() |
+| Detect query intent | `query.go` DetectQueryType() |
+| Estimate tokens | `tokens.go` EstimateTokens(), TokenBudget |
+| Chunk content for LLM | `chunking.go` ChunkContent(), ChunkSearchResults() |
+| Filter DSL queries | `filter.go` NewFilter() fluent API |
+| Add dedup support | `sqlite/dedup.go` CheckDuplicateByChecksum() |
 
 ## Dependencies
 

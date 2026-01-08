@@ -4,6 +4,109 @@ import (
 	"time"
 )
 
+// IndexProgress reports progress during document indexing
+type IndexProgress struct {
+	DocumentID      string        `json:"document_id"`
+	DocumentName    string        `json:"document_name"`
+	Status          string        `json:"status"` // "parsing", "extracting", "indexing", "embedding", "complete", "error"
+	TotalPages      int           `json:"total_pages"`
+	ProcessedPages  int           `json:"processed_pages"`
+	TotalBlocks     int           `json:"total_blocks"`
+	ProcessedBlocks int           `json:"processed_blocks"`
+	Error           error         `json:"error,omitempty"`
+	StartTime       time.Time     `json:"start_time"`
+	ElapsedTime     time.Duration `json:"elapsed_time"`
+}
+
+// ProgressCallback is called during document indexing to report progress
+type ProgressCallback func(IndexProgress)
+
+// ChunkOptions configures how content is chunked for LLM context windows
+type ChunkOptions struct {
+	MaxTokens     int    `json:"max_tokens"`     // Maximum tokens per chunk (e.g., 512, 1024)
+	OverlapTokens int    `json:"overlap_tokens"` // Token overlap between chunks
+	ChunkBy       string `json:"chunk_by"`       // "paragraph", "sentence", "tokens"
+}
+
+// DefaultChunkOptions returns sensible defaults for chunking
+func DefaultChunkOptions() ChunkOptions {
+	return ChunkOptions{
+		MaxTokens:     512,
+		OverlapTokens: 50,
+		ChunkBy:       "paragraph",
+	}
+}
+
+// Chunk represents a portion of content with token information
+type Chunk struct {
+	Content    string `json:"content"`
+	StartIdx   int    `json:"start_idx"`
+	EndIdx     int    `json:"end_idx"`
+	TokenCount int    `json:"token_count"`
+}
+
+// QueryType represents the detected intent of a search query
+type QueryType string
+
+const (
+	// QueryTypeFactual for questions like "What is X?", "Who is Y?"
+	QueryTypeFactual QueryType = "factual"
+	// QueryTypeNavigation for "Show me section...", "Find..."
+	QueryTypeNavigation QueryType = "navigation"
+	// QueryTypeSummary for "Summarize...", "Overview of..."
+	QueryTypeSummary QueryType = "summary"
+	// QueryTypeComparison for "Compare X and Y", "Difference between..."
+	QueryTypeComparison QueryType = "comparison"
+	// QueryTypeDefinition for "Define X", "What is the definition of..."
+	QueryTypeDefinition QueryType = "definition"
+	// QueryTypeList for "List all X", "Enumerate...", "What are all..."
+	QueryTypeList QueryType = "list"
+	// QueryTypeUnknown when intent cannot be determined
+	QueryTypeUnknown QueryType = "unknown"
+)
+
+// AgentSearchResponse provides AI agent-friendly search results
+type AgentSearchResponse struct {
+	Query           string              `json:"query"`
+	QueryType       QueryType           `json:"query_type"`
+	Results         []AgentSearchResult `json:"results"`
+	TotalHits       int                 `json:"total_hits"`
+	SearchTime      time.Duration       `json:"search_time"`
+	EstimatedTokens int                 `json:"estimated_tokens"`
+	Metadata        map[string]any      `json:"metadata,omitempty"`
+}
+
+// AgentSearchResult is a single result optimized for AI agent consumption
+type AgentSearchResult struct {
+	DocumentID   string         `json:"document_id"`
+	DocumentName string         `json:"document_name"`
+	BlockID      string         `json:"block_id"`
+	Content      string         `json:"content"`
+	Snippet      string         `json:"snippet"`
+	Score        float64        `json:"score"`
+	Page         int            `json:"page"`
+	Section      string         `json:"section"`
+	CitationRef  string         `json:"citation_ref"` // e.g., "[1]", "[2]"
+	TokenCount   int            `json:"token_count"`
+	Context      []ContentBlock `json:"context,omitempty"`
+	Images       []string       `json:"images,omitempty"`
+}
+
+// DedupResult contains information about duplicate detection
+type DedupResult struct {
+	IsDuplicate  bool    `json:"is_duplicate"`
+	ExistingID   string  `json:"existing_id,omitempty"`
+	ExistingName string  `json:"existing_name,omitempty"`
+	Similarity   float64 `json:"similarity"`
+	Method       string  `json:"method"` // "checksum", "content_hash", "embedding"
+}
+
+// DateRange represents a time range for filtering
+type DateRange struct {
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`
+}
+
 // BlockType represents the type of content block
 type BlockType string
 
