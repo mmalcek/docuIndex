@@ -1,0 +1,82 @@
+package encoding
+
+// WinAnsiEncoding maps character codes to Unicode code points
+// This is the Windows-1252 encoding used by many PDF fonts
+var WinAnsiEncoding = [256]rune{
+	// 0x00-0x1F: Control characters (mapped to replacement character)
+	0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD,
+	0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD,
+	0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD,
+	0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD, 0xFFFD,
+
+	// 0x20-0x7F: ASCII (same as Unicode)
+	' ', '!', '"', '#', '$', '%', '&', '\'',
+	'(', ')', '*', '+', ',', '-', '.', '/',
+	'0', '1', '2', '3', '4', '5', '6', '7',
+	'8', '9', ':', ';', '<', '=', '>', '?',
+	'@', 'A', 'B', 'C', 'D', 'E', 'F', 'G',
+	'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O',
+	'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W',
+	'X', 'Y', 'Z', '[', '\\', ']', '^', '_',
+	'`', 'a', 'b', 'c', 'd', 'e', 'f', 'g',
+	'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o',
+	'p', 'q', 'r', 's', 't', 'u', 'v', 'w',
+	'x', 'y', 'z', '{', '|', '}', '~', 0x2022, // bullet for 0x7F
+
+	// 0x80-0x9F: Windows-1252 special characters
+	0x20AC, // € Euro sign
+	0xFFFD, // undefined
+	0x201A, // ‚ Single low-9 quotation mark
+	0x0192, // ƒ Latin small letter f with hook
+	0x201E, // „ Double low-9 quotation mark
+	0x2026, // … Horizontal ellipsis
+	0x2020, // † Dagger
+	0x2021, // ‡ Double dagger
+	0x02C6, // ˆ Modifier letter circumflex accent
+	0x2030, // ‰ Per mille sign
+	0x0160, // Š Latin capital letter S with caron
+	0x2039, // ‹ Single left-pointing angle quotation mark
+	0x0152, // Œ Latin capital ligature OE
+	0xFFFD, // undefined
+	0x017D, // Ž Latin capital letter Z with caron
+	0xFFFD, // undefined
+	0xFFFD, // undefined
+	0x2018, // ' Left single quotation mark
+	0x2019, // ' Right single quotation mark
+	0x201C, // " Left double quotation mark
+	0x201D, // " Right double quotation mark
+	0x2022, // • Bullet
+	0x2013, // – En dash
+	0x2014, // — Em dash
+	0x02DC, // ˜ Small tilde
+	0x2122, // ™ Trade mark sign
+	0x0161, // š Latin small letter s with caron
+	0x203A, // › Single right-pointing angle quotation mark
+	0x0153, // œ Latin small ligature oe
+	0xFFFD, // undefined
+	0x017E, // ž Latin small letter z with caron
+	0x0178, // Ÿ Latin capital letter Y with diaeresis
+
+	// 0xA0-0xFF: Latin-1 Supplement (same as Unicode)
+	0x00A0, 0x00A1, 0x00A2, 0x00A3, 0x00A4, 0x00A5, 0x00A6, 0x00A7,
+	0x00A8, 0x00A9, 0x00AA, 0x00AB, 0x00AC, 0x00AD, 0x00AE, 0x00AF,
+	0x00B0, 0x00B1, 0x00B2, 0x00B3, 0x00B4, 0x00B5, 0x00B6, 0x00B7,
+	0x00B8, 0x00B9, 0x00BA, 0x00BB, 0x00BC, 0x00BD, 0x00BE, 0x00BF,
+	0x00C0, 0x00C1, 0x00C2, 0x00C3, 0x00C4, 0x00C5, 0x00C6, 0x00C7,
+	0x00C8, 0x00C9, 0x00CA, 0x00CB, 0x00CC, 0x00CD, 0x00CE, 0x00CF,
+	0x00D0, 0x00D1, 0x00D2, 0x00D3, 0x00D4, 0x00D5, 0x00D6, 0x00D7,
+	0x00D8, 0x00D9, 0x00DA, 0x00DB, 0x00DC, 0x00DD, 0x00DE, 0x00DF,
+	0x00E0, 0x00E1, 0x00E2, 0x00E3, 0x00E4, 0x00E5, 0x00E6, 0x00E7,
+	0x00E8, 0x00E9, 0x00EA, 0x00EB, 0x00EC, 0x00ED, 0x00EE, 0x00EF,
+	0x00F0, 0x00F1, 0x00F2, 0x00F3, 0x00F4, 0x00F5, 0x00F6, 0x00F7,
+	0x00F8, 0x00F9, 0x00FA, 0x00FB, 0x00FC, 0x00FD, 0x00FE, 0x00FF,
+}
+
+// DecodeWinAnsi decodes a byte slice using WinAnsi encoding
+func DecodeWinAnsi(data []byte) string {
+	runes := make([]rune, len(data))
+	for i, b := range data {
+		runes[i] = WinAnsiEncoding[b]
+	}
+	return string(runes)
+}
