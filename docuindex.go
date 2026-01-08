@@ -153,7 +153,12 @@ func (s *Store) IndexDocument(path string, opts ...IndexOption) (*Document, erro
 
 	// Now save images (after document exists in DB)
 	for _, img := range pendingImages {
-		imageID, err := s.db.SaveImage(doc.Info.ID, img.Data, img.Format, img.Width, img.Height, img.Page, img.Name, "")
+		// Get block ID if we have a matching content block
+		blockID := ""
+		if img.BlockIndex >= 0 && img.BlockIndex < len(doc.Content.Blocks) {
+			blockID = doc.Content.Blocks[img.BlockIndex].ID
+		}
+		imageID, err := s.db.SaveImage(doc.Info.ID, img.Data, img.Format, img.Width, img.Height, img.Page, img.Name, blockID)
 		if err != nil {
 			continue // Skip failed images
 		}
