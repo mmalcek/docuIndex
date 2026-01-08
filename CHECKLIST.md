@@ -128,30 +128,56 @@ Track implementation progress and correctness of all features.
 
 ---
 
-## Phase 3: Storage Layer
+## Phase 3: Storage Layer (SQLite)
 
-### Store Interface (storage/store.go)
-- [ ] Store interface defined
-- [ ] Thread-safe operations
-- [ ] CRUD operations
-- [ ] Document listing
+### SQLite Store (sqlite/store.go)
+- [x] SQLite database initialization
+- [x] WAL mode enabled
+- [x] Thread-safe operations via RWMutex
+- [x] Connection pooling
 - [ ] Unit tests
 
-### Filesystem Store (storage/filesystem.go)
-- [ ] Create document folder
-- [ ] Write info.json
-- [ ] Write content.json
-- [ ] Store images
-- [ ] Read operations
-- [ ] Delete operations
-- [ ] Concurrent access safety
+### Schema (sqlite/schema.go)
+- [x] Schema versioning
+- [x] Migration system (v1 -> v2)
+- [x] Documents table
+- [x] Content blocks table
+- [x] Search terms table (BM25 inverted index)
+- [x] Vectors table (embeddings as BLOBs)
+- [x] Images table
+- [x] Document tags table
 - [ ] Unit tests
 
-### Document Model (storage/document.go)
-- [ ] Document struct
-- [ ] ContentBlock struct
-- [ ] JSON serialization
-- [ ] Validation
+### Document Operations (sqlite/documents.go)
+- [x] Create document
+- [x] Read document by ID
+- [x] Update document
+- [x] Delete document (cascade)
+- [x] List documents
+- [ ] Unit tests
+
+### Block Operations (sqlite/blocks.go)
+- [x] Store content blocks
+- [x] Retrieve blocks by document
+- [x] JSON serialization for complex fields
+- [ ] Unit tests
+
+### Search Index (sqlite/search.go)
+- [x] BM25 inverted index in SQLite
+- [x] Term indexing
+- [x] Position storage
+- [x] Document frequency tracking
+- [ ] Unit tests
+
+### Image Storage (sqlite/images.go)
+- [x] Image metadata in SQLite
+- [x] Image files in data/images/
+- [x] UUID-based naming
+- [ ] Unit tests
+
+### Deduplication (sqlite/dedup.go)
+- [x] Checksum-based deduplication
+- [x] Content hash deduplication
 - [ ] Unit tests
 
 ---

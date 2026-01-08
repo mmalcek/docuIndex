@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/mariomalcek/docuindex/internal/nlp"
 )
 
 // SearchResult represents a single search hit
@@ -490,62 +492,14 @@ func tokenizeQuery(query string, stemming, stopWords bool) []string {
 	return terms
 }
 
-// stem applies Porter-like stemming
+// stem applies Porter-like stemming using the shared nlp package
 func stem(word string) string {
-	if len(word) <= 3 {
-		return word
-	}
-
-	suffixes := []string{
-		"ational", "tional", "enci", "anci", "izer", "ation", "ator",
-		"alism", "iveness", "fulness", "ousness", "aliti", "iviti",
-		"biliti", "logi", "ness", "ment", "ent", "ism", "ate", "iti",
-		"ous", "ive", "ize", "ing", "ies", "ied", "ion", "ity", "ful",
-		"able", "ible", "ant", "al", "er", "ic", "ly", "ed", "es", "s",
-	}
-
-	replacements := map[string]string{
-		"ational": "ate", "tional": "tion", "enci": "ence", "anci": "ance",
-		"izer": "ize", "ization": "ize", "ation": "ate", "ator": "ate",
-		"fulness": "ful", "ousness": "ous", "iveness": "ive",
-		"ies": "i", "ied": "i",
-	}
-
-	for suffix, replacement := range replacements {
-		if strings.HasSuffix(word, suffix) && len(word)-len(suffix) >= 2 {
-			return word[:len(word)-len(suffix)] + replacement
-		}
-	}
-
-	for _, suffix := range suffixes {
-		if strings.HasSuffix(word, suffix) && len(word)-len(suffix) >= 2 {
-			return word[:len(word)-len(suffix)]
-		}
-	}
-
-	return word
+	return nlp.Stem(word)
 }
 
-// isStopWord checks if word is a stop word
+// isStopWord checks if word is a stop word using the shared nlp package
 func isStopWord(word string) bool {
-	stopWords := map[string]bool{
-		"the": true, "a": true, "an": true, "and": true, "or": true,
-		"but": true, "in": true, "on": true, "at": true, "to": true,
-		"for": true, "of": true, "with": true, "by": true, "from": true,
-		"as": true, "is": true, "was": true, "are": true, "were": true,
-		"been": true, "be": true, "have": true, "has": true, "had": true,
-		"do": true, "does": true, "did": true, "will": true, "would": true,
-		"could": true, "should": true, "may": true, "might": true, "must": true,
-		"shall": true, "can": true, "this": true, "that": true, "these": true,
-		"those": true, "it": true, "its": true, "they": true, "their": true,
-		"them": true, "we": true, "our": true, "you": true, "your": true,
-		"he": true, "she": true, "him": true, "her": true, "his": true,
-		"not": true, "no": true, "all": true, "each": true, "every": true,
-		"both": true, "few": true, "more": true, "most": true, "other": true,
-		"some": true, "such": true, "than": true, "too": true, "very": true,
-		"just": true, "also": true, "now": true, "only": true, "so": true,
-	}
-	return stopWords[word]
+	return nlp.IsStopWord(word)
 }
 
 // generateSnippet creates a highlighted snippet

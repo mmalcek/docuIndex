@@ -73,14 +73,6 @@ func NewStore(basePath string, opts ...StoreOption) (*Store, error) {
 	return s, nil
 }
 
-// WithEmbedding sets up an embedding provider for semantic search
-func WithEmbedding(provider embedding.Provider) StoreOption {
-	return func(c *storeConfig) {
-		// Store provider reference in config for later use
-		// This is a placeholder - we'll set it up in NewStore
-	}
-}
-
 // SetEmbeddingProvider configures the embedding provider after store creation
 func (s *Store) SetEmbeddingProvider(provider embedding.Provider) error {
 	s.mu.Lock()

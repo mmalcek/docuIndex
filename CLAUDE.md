@@ -69,12 +69,15 @@ docuindex/
 │   └── hnsw.go        # Pure Go HNSW implementation
 │
 ├── search/             # Search functionality
-│   ├── index.go       # Inverted index (legacy, for reference)
-│   ├── tokenizer.go   # Text tokenization with Porter stemming
-│   ├── query.go       # Query parsing (boolean, phrase)
-│   ├── ranking.go     # BM25 ranking with boosting
+│   ├── types.go       # Minimal SearchResult for internal fusion
+│   ├── query.go       # Snippet extraction utility
 │   ├── hybrid.go      # Hybrid BM25 + vector search
 │   └── fusion.go      # RRF score fusion
+│
+├── internal/           # Internal shared packages
+│   └── nlp/           # Natural language processing
+│       ├── stopwords.go  # Shared stop word detection
+│       └── stemmer.go    # Shared Porter stemmer
 │
 ├── cmd/                # CLI tools
 │   └── test_pdf/
@@ -594,6 +597,8 @@ go run main.go detect-intent "summarize this"  # Detect query intent type
 | Chunk content for LLM | `chunking.go` ChunkContent(), ChunkSearchResults() |
 | Filter DSL queries | `filter.go` NewFilter() fluent API |
 | Add dedup support | `sqlite/dedup.go` CheckDuplicateByChecksum() |
+| Modify stop words | `internal/nlp/stopwords.go` IsStopWord() |
+| Modify stemming | `internal/nlp/stemmer.go` Stem() |
 
 ## Dependencies
 

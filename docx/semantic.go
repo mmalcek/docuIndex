@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+
+	"github.com/mariomalcek/docuindex/internal/nlp"
 )
 
 // SemanticExtractor performs semantic analysis on extracted content
@@ -367,29 +369,9 @@ func tokenize(text string) []string {
 	return words
 }
 
-// isStopWord checks if a word is a common stop word
+// isStopWord checks if a word is a common stop word using the shared nlp package
 func isStopWord(word string) bool {
-	stopWords := map[string]bool{
-		"the": true, "a": true, "an": true, "and": true, "or": true,
-		"but": true, "in": true, "on": true, "at": true, "to": true,
-		"for": true, "of": true, "with": true, "by": true, "from": true,
-		"as": true, "is": true, "was": true, "are": true, "were": true,
-		"been": true, "be": true, "have": true, "has": true, "had": true,
-		"do": true, "does": true, "did": true, "will": true, "would": true,
-		"could": true, "should": true, "may": true, "might": true, "must": true,
-		"shall": true, "can": true, "this": true, "that": true, "these": true,
-		"those": true, "it": true, "its": true, "they": true, "their": true,
-		"them": true, "we": true, "our": true, "you": true, "your": true,
-		"he": true, "she": true, "him": true, "her": true, "his": true,
-		"not": true, "no": true, "all": true, "each": true, "every": true,
-		"both": true, "few": true, "more": true, "most": true, "other": true,
-		"some": true, "such": true, "than": true, "too": true, "very": true,
-		"just": true, "also": true, "now": true, "only": true, "even": true,
-		"back": true, "after": true, "before": true, "being": true, "into": true,
-		"through": true, "during": true, "under": true, "above": true, "between": true,
-		"about": true, "against": true, "because": true, "until": true, "while": true,
-	}
-	return stopWords[word]
+	return nlp.IsStopWord(word)
 }
 
 // formatBlockID formats a block ID
