@@ -204,6 +204,17 @@ for _, r := range results.Results {
     fmt.Printf("Score: %.2f\n", r.Score)
     fmt.Printf("Snippet: %s\n", r.Snippet)
 }
+
+// Search with images included in results
+results, err = store.Search("diagram",
+    docuindex.WithImages(true),
+)
+for _, r := range results.Results {
+    if len(r.Images) > 0 {
+        fmt.Printf("Images in section: %v\n", r.Images)
+        // e.g., ["images/uuid1.png", "images/uuid2.jpeg"]
+    }
+}
 ```
 
 #### Search Modes
@@ -319,6 +330,11 @@ page3Blocks := doc.GetBlocksByPage(3)
 
 // Find a specific block
 block := doc.GetBlockByID("blk_042")
+
+// Get images by document with optional filters
+images, err := store.GetImagesByDocumentFiltered("doc-id", "", 0) // All images
+images, err := store.GetImagesByDocumentFiltered("doc-id", "Introduction", 0) // By section
+images, err := store.GetImagesByDocumentFiltered("doc-id", "", 3) // By page
 ```
 
 ### Store Statistics

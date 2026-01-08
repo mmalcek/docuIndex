@@ -254,3 +254,87 @@ func (s *Store) GetImagePath(imageID, format string) string {
 	filename := fmt.Sprintf("%s.%s", imageID, format)
 	return filepath.Join(s.imagesDir, filename)
 }
+
+// GetImagesBySection retrieves all images for a document in a specific section
+func (s *Store) GetImagesBySection(documentID, section string) ([]ImageInfo, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`
+		SELECT i.id, i.document_id, i.block_id, i.format, i.width, i.height, i.page, i.original_name
+		FROM images i
+		JOIN content_blocks cb ON i.block_id = cb.id AND i.document_id = cb.document_id
+		WHERE i.document_id = ? AND cb.section = ?
+		ORDER BY i.page, i.id
+	`, documentID, section)
+	if err != nil {
+		return nil, fmt.Errorf("query images by section: %w", err)
+	}
+	defer rows.Close()
+
+	var images []ImageInfo
+	for rows.Next() {
+		var info ImageInfo
+		var blockID sql.NullString
+
+		err := rows.Scan(
+			&info.ID,
+			&info.DocumentID,
+			&blockID,
+			&info.Format,
+			&info.Width,
+			&info.Height,
+			&info.Page,
+			&info.OriginalName,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan image: %w", err)
+		}
+
+		info.BlockID = blockID.String
+		images = append(images, info)
+	}
+
+	return images, rows.Err()
+}
+
+// GetImagesByPage retrieves all images for a document on a specific page
+func (s *Store) GetImagesByPage(documentID string, page int) ([]ImageInfo, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`
+		SELECT id, document_id, block_id, format, width, height, page, original_name
+		FROM images WHERE document_id = ? AND page = ?
+		ORDER BY id
+	`, documentID, page)
+	if err != nil {
+		return nil, fmt.Errorf("query images by page: %w", err)
+	}
+	defer rows.Close()
+
+	var images []ImageInfo
+	for rows.Next() {
+		var info ImageInfo
+		var blockID sql.NullString
+
+		err := rows.Scan(
+			&info.ID,
+			&info.DocumentID,
+			&blockID,
+			&info.Format,
+			&info.Width,
+			&info.Height,
+			&info.Page,
+			&info.OriginalName,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan image: %w", err)
+		}
+
+		info.BlockID = blockID.String
+		images = append(images, info)
+	}
+
+	return images, rows.Err()
+}

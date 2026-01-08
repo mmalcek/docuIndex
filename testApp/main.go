@@ -74,6 +74,8 @@ func main() {
 		runEmbedCommand(os.Args[2:])
 	case "embed-test":
 		runEmbedTestCommand(os.Args[2:])
+	case "images":
+		runImagesCommand(os.Args[2:])
 	default:
 		fmt.Printf("Unknown command: %s\n", command)
 		printUsage()
@@ -95,6 +97,7 @@ func printUsage() {
 	fmt.Println("  cleanup                   Remove all test data")
 	fmt.Println("  embed <doc_id>            Generate embeddings for a document")
 	fmt.Println("  embed-test                Test embedding provider connection")
+	fmt.Println("  images                    List images in a document or section")
 	fmt.Println()
 	fmt.Println("Embedding Flags (for search, embed commands):")
 	fmt.Println("  -provider <name>          Embedding provider: azure, openai, ollama")
@@ -476,6 +479,7 @@ func printDebugSummary(doc *docuindex.Document) {
 
 func runSearchCommand(args []string) {
 	fs := flag.NewFlagSet("search", flag.ExitOnError)
+	showImages := fs.Bool("show-images", false, "Include images from matching sections")
 	addCommonFlags(fs)
 	addEmbeddingFlags(fs)
 	addSearchFlags(fs)
@@ -518,6 +522,10 @@ func runSearchCommand(args []string) {
 	searchOpts = append(searchOpts, docuindex.WithContextWindow(2))
 	searchOpts = append(searchOpts, docuindex.WithHighlight("**", "**"))
 
+	if *showImages {
+		searchOpts = append(searchOpts, docuindex.WithImages(true))
+	}
+
 	switch searchMode {
 	case "keyword":
 		searchOpts = append(searchOpts, docuindex.WithSearchMode(docuindex.SearchModeKeyword))
@@ -553,6 +561,9 @@ func runSearchCommand(args []string) {
 			fmt.Printf("  Section:  %s\n", result.Section)
 		}
 		fmt.Printf("  Snippet:  %s\n", truncateString(result.Snippet, 150))
+		if len(result.Images) > 0 {
+			fmt.Printf("  Images:   %v\n", result.Images)
+		}
 		fmt.Println()
 	}
 }
@@ -1092,6 +1103,61 @@ func truncateString(s string, maxLen int) string {
 		return s[:maxLen] + "..."
 	}
 	return s
+}
+
+func runImagesCommand(args []string) {
+	fs := flag.NewFlagSet("images", flag.ExitOnError)
+	docID := fs.String("doc", "", "Document ID (required)")
+	section := fs.String("section", "", "Filter by section name")
+	page := fs.Int("page", 0, "Filter by page number")
+	addCommonFlags(fs)
+	fs.Parse(args)
+
+	if *docID == "" {
+		fmt.Println("Error: Please provide a document ID with -doc flag")
+		fmt.Println("Usage: testApp images -doc <doc_id> [-section <name>] [-page <n>]")
+		os.Exit(1)
+	}
+
+	fmt.Printf("Listing images for document: %s\n", *docID)
+	if *section != "" {
+		fmt.Printf("Section filter: %s\n", *section)
+	}
+	if *page > 0 {
+		fmt.Printf("Page filter: %d\n", *page)
+	}
+	fmt.Println(strings.Repeat("-", 50))
+
+	store, err := createStore()
+	if err != nil {
+		log.Fatalf("Error creating store: %v", err)
+	}
+	defer store.Close()
+
+	// Get images based on filters
+	images, err := store.GetImagesByDocumentFiltered(*docID, *section, *page)
+	if err != nil {
+		log.Fatalf("Error getting images: %v", err)
+	}
+
+	if len(images) == 0 {
+		fmt.Println("No images found matching the criteria.")
+		return
+	}
+
+	fmt.Printf("Found %d image(s)\n\n", len(images))
+
+	for i, img := range images {
+		fmt.Printf("Image %d:\n", i+1)
+		fmt.Printf("  ID:       %s\n", img.ID)
+		fmt.Printf("  Path:     images/%s.%s\n", img.ID, img.Format)
+		fmt.Printf("  Format:   %s\n", img.Format)
+		fmt.Printf("  Page:     %d\n", img.Page)
+		if img.OriginalName != "" {
+			fmt.Printf("  Name:     %s\n", img.OriginalName)
+		}
+		fmt.Println()
+	}
 }
 
 // findDocumentFiles searches for supported document files (PDF, DOCX) in a directory

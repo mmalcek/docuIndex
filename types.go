@@ -151,15 +151,14 @@ func (d *Document) GetBlockByID(id string) *ContentBlock {
 
 // ImageInfo contains metadata about an extracted image
 type ImageInfo struct {
-	ID         string      `json:"id"`          // Image ID (e.g., "img_001")
-	Path       string      `json:"path"`        // Relative path to image file
-	Width      int         `json:"width"`       // Image width in pixels
-	Height     int         `json:"height"`      // Image height in pixels
-	Format     string      `json:"format"`      // png, jpeg, etc.
-	ColorSpace string      `json:"color_space"` // RGB, CMYK, Grayscale
-	BBox       BoundingBox `json:"bbox"`        // Position in document
-	Page       int         `json:"page"`        // Page number
-	Context    string      `json:"context"`     // Surrounding text context
+	ID           string `json:"id"`                      // Image UUID
+	DocumentID   string `json:"document_id,omitempty"`   // Parent document ID
+	BlockID      string `json:"block_id,omitempty"`      // Associated content block ID
+	Format       string `json:"format"`                  // png, jpeg, etc.
+	Width        int    `json:"width"`                   // Image width in pixels
+	Height       int    `json:"height"`                  // Image height in pixels
+	Page         int    `json:"page"`                    // Page number
+	OriginalName string `json:"original_name,omitempty"` // Original image name from PDF/DOCX
 }
 
 // SearchResult represents a single search hit
@@ -174,6 +173,7 @@ type SearchResult struct {
 	Section      string         `json:"section"`      // Section name
 	Context      []ContentBlock `json:"context"`      // Surrounding blocks for RAG
 	Positions    []int          `json:"positions"`    // Match positions in content
+	Images       []string       `json:"images,omitempty"` // Image paths in same section
 }
 
 // SearchResults contains search results with metadata

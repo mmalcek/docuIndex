@@ -194,7 +194,7 @@ CREATE TABLE document_tags (
 | `Document` | Parsed document with metadata and content blocks |
 | `DocumentInfo` | Metadata (ID, Name, Size, PageCount, Format, Source, Description, ImportedAt, ExternalID, Timestamps) |
 | `Store` | Document storage and search interface |
-| `SearchResult` | Search hit with score, snippet, and context |
+| `SearchResult` | Search hit with score, snippet, context, and images |
 | `SearchResults` | Query results with timing and total hits |
 | `BoundingBox` | Position information with `RelativePosition()` method |
 | `SemanticInfo` | AI-friendly metadata (headings, sections, keywords) |
@@ -331,6 +331,7 @@ docuindex.WithVectorWeight(float64)    // Weight for vector search (0-1)
 docuindex.WithKeywordWeight(float64)   // Weight for keyword search (0-1)
 docuindex.WithSources(...strings)      // Filter by source or format
 docuindex.WithTags(map[string]string)  // Filter by tags (AND logic)
+docuindex.WithImages(bool)             // Include image paths in results
 ```
 
 ### Embedding Providers
@@ -379,6 +380,10 @@ go run main.go list
 go run main.go info <doc-id>
 go run main.go full-test /path/to/file.pdf     # Run all tests with PDF
 go run main.go full-test /path/to/file.docx    # Run all tests with DOCX
+go run main.go search -show-images "query"     # Search with images in results
+go run main.go images -doc <doc-id>            # List all images for document
+go run main.go images -doc <doc-id> -section "Section Name"  # Filter by section
+go run main.go images -doc <doc-id> -page 5    # Filter by page
 ```
 
 ## PDF Operators Implemented
@@ -486,6 +491,8 @@ go run main.go full-test /path/to/file.docx    # Run all tests with DOCX
 | Add custom data indexing | `docuindex.go` IndexCustomData() |
 | Add tag filtering | `sqlite/tags.go` |
 | Check embedding status | `docuindex.go` GetEmbeddingStatus(), HasEmbeddings() |
+| Query images by section/page | `sqlite/images.go` GetImagesBySection(), GetImagesByPage() |
+| Include images in search | `docuindex.go` Search() with WithImages(true) |
 
 ## Dependencies
 

@@ -980,6 +980,18 @@ func (s *Store) Search(query string, opts ...SearchOption) (*SearchResults, erro
 				results[i].Context = append(results[i].Context, ctx.After...)
 			}
 		}
+
+		// Get images if requested
+		if config.IncludeImages && r.Section != "" {
+			images, err := s.db.GetImagesBySection(r.DocumentID, r.Section)
+			if err == nil && len(images) > 0 {
+				imagePaths := make([]string, len(images))
+				for j, img := range images {
+					imagePaths[j] = fmt.Sprintf("images/%s.%s", img.ID, img.Format)
+				}
+				results[i].Images = imagePaths
+			}
+		}
 	}
 
 	return &SearchResults{
@@ -1123,6 +1135,43 @@ func (s *Store) GetLastImportTime(source string) (time.Time, error) {
 	defer s.mu.RUnlock()
 
 	return s.db.GetLastImportTime(source)
+}
+
+// GetImagesByDocumentFiltered returns images for a document with optional section/page filters
+func (s *Store) GetImagesByDocumentFiltered(docID, section string, page int) ([]ImageInfo, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var images []sqlite.ImageInfo
+	var err error
+
+	if section != "" {
+		images, err = s.db.GetImagesBySection(docID, section)
+	} else if page > 0 {
+		images, err = s.db.GetImagesByPage(docID, page)
+	} else {
+		images, err = s.db.GetImagesForDocument(docID)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]ImageInfo, len(images))
+	for i, img := range images {
+		result[i] = ImageInfo{
+			ID:           img.ID,
+			DocumentID:   img.DocumentID,
+			BlockID:      img.BlockID,
+			Format:       img.Format,
+			Width:        img.Width,
+			Height:       img.Height,
+			Page:         img.Page,
+			OriginalName: img.OriginalName,
+		}
+	}
+
+	return result, nil
 }
 
 // GetEmbeddingStatus returns the embedding status for a document
