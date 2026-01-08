@@ -332,6 +332,40 @@ fmt.Printf("Index terms: %d\n", stats.IndexTerms)
 fmt.Printf("Vectors: %d\n", stats.VectorCount)
 ```
 
+### Embedding Status
+
+Check whether embeddings have been generated for a document:
+
+```go
+// Quick check if any embeddings exist
+hasEmb, err := store.HasEmbeddings(docID)
+if hasEmb {
+    fmt.Println("Document has embeddings")
+}
+
+// Get detailed embedding status
+status, err := store.GetEmbeddingStatus(docID)
+fmt.Printf("Progress: %.1f%% (%d/%d blocks)\n",
+    status.Progress(), status.EmbeddedCount, status.TotalEmbeddable)
+
+if status.IsComplete {
+    fmt.Println("Fully embedded")
+} else if status.HasEmbeddings {
+    fmt.Println("Partially embedded")
+} else {
+    fmt.Println("No embeddings")
+}
+
+// EmbeddingStatus fields:
+// - HasEmbeddings   bool      - true if any embeddings exist
+// - IsComplete      bool      - true if all embeddable blocks have vectors
+// - EmbeddedCount   int       - number of blocks with embeddings
+// - TotalEmbeddable int       - number of blocks that can be embedded
+// - Model           string    - embedding model used
+// - Dimension       int       - vector dimension
+// - LastUpdated     time.Time - when embeddings were last updated
+```
+
 ## Storage Architecture
 
 DocuIndex uses a unified SQLite database for all metadata and search indices:

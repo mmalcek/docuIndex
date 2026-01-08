@@ -233,6 +233,25 @@ func (s *Store) GetBlockCountForDocument(documentID string) (int, error) {
 	return count, nil
 }
 
+// GetEmbeddableBlockCountForDocument returns the count of blocks that can be embedded
+// (text, heading, custom types with non-empty content)
+func (s *Store) GetEmbeddableBlockCountForDocument(documentID string) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM content_blocks
+		WHERE document_id = ?
+		AND type IN ('text', 'heading', 'custom')
+		AND content != '' AND content IS NOT NULL
+	`, documentID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count embeddable blocks: %w", err)
+	}
+	return count, nil
+}
+
 // GetContextBlocks retrieves blocks around a target block for RAG
 func (s *Store) GetContextBlocks(documentID, blockID string, windowSize int) (before, center, after []ContentBlock, err error) {
 	s.mu.RLock()

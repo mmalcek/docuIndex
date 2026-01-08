@@ -203,6 +203,7 @@ CREATE TABLE document_tags (
 | `SearchMode` | Search type: keyword, semantic, or hybrid |
 | `CustomData` | Structured data source with entries, tags, ImportedAt, and ExternalID for upsert |
 | `DataEntry` | Single entry in custom data with content and metadata |
+| `EmbeddingStatus` | Document embedding state (HasEmbeddings, IsComplete, EmbeddedCount, TotalEmbeddable, Model, Dimension, LastUpdated) |
 
 ## Public API
 
@@ -288,6 +289,19 @@ provider, _ := embedding.NewProvider(embedding.Config{
     Model:    "nomic-embed-text",
 })
 store.SetEmbeddingProvider(provider)
+
+// Check embedding status for a document
+hasEmb, err := store.HasEmbeddings(docID)  // Quick check
+
+status, err := store.GetEmbeddingStatus(docID)  // Detailed status
+// status.HasEmbeddings   - true if any embeddings exist
+// status.IsComplete      - true if all embeddable blocks have vectors
+// status.EmbeddedCount   - number of blocks with embeddings
+// status.TotalEmbeddable - number of blocks that can be embedded
+// status.Model           - embedding model used
+// status.Dimension       - vector dimension
+// status.LastUpdated     - when embeddings were last updated
+// status.Progress()      - returns completion percentage (0-100)
 ```
 
 ## Configuration Options
@@ -469,6 +483,7 @@ go run main.go full-test /path/to/file.docx  # Run all tests with DOCX
 | Modify hybrid search fusion | `search/fusion.go` |
 | Add custom data indexing | `docuindex.go` IndexCustomData() |
 | Add tag filtering | `sqlite/tags.go` |
+| Check embedding status | `docuindex.go` GetEmbeddingStatus(), HasEmbeddings() |
 
 ## Dependencies
 

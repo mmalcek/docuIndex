@@ -234,3 +234,22 @@ type CustomData struct {
 	ImportedAt  time.Time         `json:"imported_at,omitempty"` // When data was imported (for incremental updates)
 	ExternalID  string            `json:"external_id,omitempty"` // Unique ID from source system (for upsert)
 }
+
+// EmbeddingStatus contains information about a document's embedding state
+type EmbeddingStatus struct {
+	HasEmbeddings   bool      `json:"has_embeddings"`              // True if any embeddings exist
+	IsComplete      bool      `json:"is_complete"`                 // True if all embeddable blocks have vectors
+	EmbeddedCount   int       `json:"embedded_count"`              // Number of blocks with embeddings
+	TotalEmbeddable int       `json:"total_embeddable"`            // Number of blocks that can be embedded
+	Model           string    `json:"model,omitempty"`             // Embedding model used
+	Dimension       int       `json:"dimension,omitempty"`         // Vector dimension
+	LastUpdated     time.Time `json:"last_updated,omitempty"`      // When embeddings were last updated
+}
+
+// Progress returns embedding completion as a percentage (0-100)
+func (e *EmbeddingStatus) Progress() float64 {
+	if e.TotalEmbeddable == 0 {
+		return 100.0 // Nothing to embed = complete
+	}
+	return float64(e.EmbeddedCount) / float64(e.TotalEmbeddable) * 100.0
+}

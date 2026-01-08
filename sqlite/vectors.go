@@ -176,6 +176,51 @@ func (s *Store) GetVectorCount() (int, error) {
 	return count, nil
 }
 
+// GetVectorCountForDocument returns the vector count for a specific document
+func (s *Store) GetVectorCountForDocument(documentID string) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM vectors WHERE document_id = ?`, documentID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count vectors for document: %w", err)
+	}
+	return count, nil
+}
+
+// VectorInfo contains metadata about vectors for a document
+type VectorInfo struct {
+	Count       int
+	Model       string
+	Dimension   int
+	LastUpdated time.Time
+}
+
+// GetVectorInfo returns vector metadata for a document
+func (s *Store) GetVectorInfo(documentID string) (*VectorInfo, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var info VectorInfo
+	var lastUpdated string
+
+	err := s.db.QueryRow(`
+		SELECT COUNT(*), COALESCE(MAX(model), ''), COALESCE(MAX(dimension), 0), COALESCE(MAX(created_at), '')
+		FROM vectors WHERE document_id = ?
+	`, documentID).Scan(&info.Count, &info.Model, &info.Dimension, &lastUpdated)
+
+	if err != nil {
+		return nil, fmt.Errorf("get vector info: %w", err)
+	}
+
+	if lastUpdated != "" {
+		info.LastUpdated, _ = time.Parse(time.RFC3339, lastUpdated)
+	}
+
+	return &info, nil
+}
+
 // NeedsReembedding checks if a block needs re-embedding (text changed)
 func (s *Store) NeedsReembedding(documentID, blockID, text string) (bool, error) {
 	s.mu.RLock()

@@ -1080,6 +1080,48 @@ func (s *Store) GetLastImportTime(source string) (time.Time, error) {
 	return s.db.GetLastImportTime(source)
 }
 
+// GetEmbeddingStatus returns the embedding status for a document
+func (s *Store) GetEmbeddingStatus(docID string) (*EmbeddingStatus, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Get embeddable block count
+	embeddable, err := s.db.GetEmbeddableBlockCountForDocument(docID)
+	if err != nil {
+		return nil, fmt.Errorf("get embeddable count: %w", err)
+	}
+
+	// Get vector info
+	vectorInfo, err := s.db.GetVectorInfo(docID)
+	if err != nil {
+		return nil, fmt.Errorf("get vector info: %w", err)
+	}
+
+	status := &EmbeddingStatus{
+		HasEmbeddings:   vectorInfo.Count > 0,
+		IsComplete:      vectorInfo.Count >= embeddable,
+		EmbeddedCount:   vectorInfo.Count,
+		TotalEmbeddable: embeddable,
+		Model:           vectorInfo.Model,
+		Dimension:       vectorInfo.Dimension,
+		LastUpdated:     vectorInfo.LastUpdated,
+	}
+
+	return status, nil
+}
+
+// HasEmbeddings is a convenience method that returns true if a document has any embeddings
+func (s *Store) HasEmbeddings(docID string) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	count, err := s.db.GetVectorCountForDocument(docID)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // Close releases resources held by the store
 func (s *Store) Close() error {
 	s.mu.Lock()
