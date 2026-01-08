@@ -211,20 +211,83 @@ Track implementation progress and correctness of all features.
 
 ---
 
-## Phase 6: DOCX Support (Future)
+## Phase 6: DOCX Support
 
-### Parser (docx/parser.go)
-- [ ] ZIP extraction
-- [ ] document.xml parsing
-- [ ] styles.xml parsing
+### Document Loader (docx/document.go)
+- [x] ZIP extraction using archive/zip
+- [x] Open from file path
+- [x] Open from bytes
+- [x] Lazy loading of XML parts
+- [x] Content types parsing
 - [ ] Unit tests
 
-### Content (docx/content.go)
-- [ ] Paragraph extraction
-- [ ] Text runs
-- [ ] Style detection
-- [ ] Image extraction
+### XML Types (docx/types.go)
+- [x] Document/Body/Paragraph structures
+- [x] Run/Text/Drawing structures
+- [x] Style/Numbering XML types
+- [x] Relationship types
+- [x] ContentBlock/BoundingBox types
 - [ ] Unit tests
+
+### Styles (docx/styles.go)
+- [x] Parse styles.xml
+- [x] Style inheritance resolution
+- [x] Heading style detection
+- [x] Font property resolution
+- [ ] Unit tests
+
+### Relationships (docx/relationships.go)
+- [x] Parse .rels files
+- [x] Image path resolution
+- [x] Hyperlink resolution
+- [ ] Unit tests
+
+### Numbering (docx/numbering.go)
+- [x] Parse numbering.xml
+- [x] List type detection
+- [x] List level handling
+- [ ] Unit tests
+
+### Text Extraction (docx/text.go)
+- [x] Paragraph text extraction
+- [x] Run text combination
+- [x] Tab/break handling
+- [x] Font property extraction
+- [ ] Unit tests
+
+### Image Extraction (docx/image.go)
+- [x] Extract from word/media/
+- [x] Drawing element parsing
+- [x] Dimension extraction (EMU conversion)
+- [ ] Unit tests
+
+### Table Extraction (docx/table.go)
+- [x] Table structure parsing
+- [x] Cell content extraction
+- [x] Markdown/text conversion
+- [ ] Unit tests
+
+### Semantic Analysis (docx/semantic.go)
+- [x] SemanticExtractor orchestrator
+- [x] Heading detection
+- [x] List detection
+- [x] Section tracking
+- [x] Keyword extraction
+- [x] Position estimation
+- [ ] Unit tests
+
+### Metadata (docx/metadata.go)
+- [x] Core properties parsing
+- [x] App properties parsing
+- [x] Page/word count extraction
+- [ ] Unit tests
+
+### Integration (docuindex.go)
+- [x] indexDOCX function
+- [x] indexDOCXFromBytes function
+- [x] convertDOCXContent function
+- [x] Image extraction integration
+- [ ] Integration tests
 
 ---
 

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mariomalcek/docuindex/docx"
 	"github.com/mariomalcek/docuindex/pdf"
 	"github.com/mariomalcek/docuindex/search"
 	"github.com/mariomalcek/docuindex/storage"
@@ -72,7 +73,7 @@ func (s *Store) IndexDocument(path string, opts ...IndexOption) (*Document, erro
 	case ".pdf":
 		doc, err = s.indexPDF(path, config)
 	case ".docx":
-		return nil, fmt.Errorf("DOCX support not yet implemented")
+		doc, err = s.indexDOCX(path, config)
 	default:
 		return nil, fmt.Errorf("unsupported file format: %s", ext)
 	}
@@ -193,6 +194,140 @@ func (s *Store) indexPDF(path string, config *indexConfig) (*Document, error) {
 	return doc, nil
 }
 
+// indexDOCX indexes a DOCX file
+func (s *Store) indexDOCX(path string, config *indexConfig) (*Document, error) {
+	// Open DOCX
+	docxDoc, err := docx.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open DOCX: %w", err)
+	}
+	defer docxDoc.Close()
+
+	// Generate document ID
+	docID := generateID()
+
+	// Get file info
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat file: %w", err)
+	}
+
+	// Compute checksum
+	var checksum string
+	if s.config.ComputeChecksum {
+		checksum, _ = computeChecksum(path)
+	}
+
+	// Get page count from metadata
+	pageCount, _ := docxDoc.PageCount()
+	if pageCount == 0 {
+		pageCount = 1 // Default to 1 page
+	}
+
+	// Create semantic extractor
+	extractor, err := docx.NewSemanticExtractor(docxDoc)
+	if err != nil {
+		return nil, fmt.Errorf("create extractor: %w", err)
+	}
+
+	// Extract content
+	docxContent, err := extractor.ExtractContent()
+	if err != nil {
+		return nil, fmt.Errorf("extract content: %w", err)
+	}
+
+	// Convert docx.DocumentContent to docuindex.DocumentContent
+	content := convertDOCXContent(docxContent)
+
+	// Extract and save images if enabled
+	if s.config.ExtractImages {
+		imageExtractor, err := docx.NewImageExtractor(docxDoc)
+		if err == nil {
+			images, err := imageExtractor.ExtractAllImages()
+			if err == nil {
+				for i, img := range images {
+					imageID := fmt.Sprintf("img_%03d", i+1)
+					s.fs.SaveImage(docID, imageID, img.Data, img.Format)
+
+					// Update content block references to images
+					for j := range content.Blocks {
+						if content.Blocks[j].Type == BlockTypeImage &&
+							content.Blocks[j].Content == img.Name {
+							content.Blocks[j].Content = fmt.Sprintf("images/%s.%s", imageID, img.Format)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Build document
+	name := filepath.Base(path)
+	if config.Name != "" {
+		name = config.Name
+	}
+
+	doc := &Document{
+		Info: DocumentInfo{
+			ID:           docID,
+			Name:         name,
+			OriginalPath: path,
+			SizeBytes:    fileInfo.Size(),
+			PageCount:    pageCount,
+			Format:       FormatDOCX,
+			Checksum:     checksum,
+			CreatedAt:    time.Now(),
+			UpdatedAt:    time.Now(),
+		},
+		Content: content,
+	}
+
+	return doc, nil
+}
+
+// indexDOCXFromBytes indexes a DOCX from bytes
+func (s *Store) indexDOCXFromBytes(data []byte, name string, config *indexConfig) (*Document, error) {
+	docxDoc, err := docx.OpenBytes(data)
+	if err != nil {
+		return nil, fmt.Errorf("open DOCX: %w", err)
+	}
+	defer docxDoc.Close()
+
+	docID := generateID()
+
+	pageCount, _ := docxDoc.PageCount()
+	if pageCount == 0 {
+		pageCount = 1
+	}
+
+	extractor, err := docx.NewSemanticExtractor(docxDoc)
+	if err != nil {
+		return nil, fmt.Errorf("create extractor: %w", err)
+	}
+
+	docxContent, err := extractor.ExtractContent()
+	if err != nil {
+		return nil, fmt.Errorf("extract content: %w", err)
+	}
+
+	content := convertDOCXContent(docxContent)
+
+	doc := &Document{
+		Info: DocumentInfo{
+			ID:        docID,
+			Name:      name,
+			SizeBytes: int64(len(data)),
+			PageCount: pageCount,
+			Format:    FormatDOCX,
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		},
+		Content: content,
+	}
+
+	return doc, nil
+}
+
 // IndexReader indexes a document from an io.Reader
 func (s *Store) IndexReader(r io.Reader, name string, opts ...IndexOption) (*Document, error) {
 	s.mu.Lock()
@@ -219,6 +354,8 @@ func (s *Store) IndexReader(r io.Reader, name string, opts ...IndexOption) (*Doc
 	switch ext {
 	case ".pdf":
 		doc, err = s.indexPDFFromBytes(data, name, config)
+	case ".docx":
+		doc, err = s.indexDOCXFromBytes(data, name, config)
 	default:
 		return nil, fmt.Errorf("unsupported file format: %s", ext)
 	}
@@ -589,6 +726,50 @@ func convertPDFContent(pdfContent *pdf.DocumentContent) DocumentContent {
 	}
 
 	for i, block := range pdfContent.Blocks {
+		content.Blocks[i] = ContentBlock{
+			ID:      block.ID,
+			Type:    BlockType(block.Type),
+			Content: block.Content,
+			Page:    block.Page,
+			BBox: BoundingBox{
+				X:          block.BBox.X,
+				Y:          block.BBox.Y,
+				Width:      block.BBox.Width,
+				Height:     block.BBox.Height,
+				PageWidth:  block.BBox.PageWidth,
+				PageHeight: block.BBox.PageHeight,
+			},
+			Semantic: SemanticInfo{
+				IsHeading:    block.Semantic.IsHeading,
+				HeadingLevel: block.Semantic.HeadingLevel,
+				Section:      block.Semantic.Section,
+				Keywords:     block.Semantic.Keywords,
+				Context:      block.Semantic.Context,
+			},
+			Children: block.Children,
+		}
+
+		if block.Font != nil {
+			content.Blocks[i].Font = &FontInfo{
+				Name:   block.Font.Name,
+				Size:   block.Font.Size,
+				Bold:   block.Font.Bold,
+				Italic: block.Font.Italic,
+			}
+		}
+	}
+
+	return content
+}
+
+// convertDOCXContent converts docx.DocumentContent to docuindex.DocumentContent
+func convertDOCXContent(docxContent *docx.DocumentContent) DocumentContent {
+	content := DocumentContent{
+		Version: docxContent.Version,
+		Blocks:  make([]ContentBlock, len(docxContent.Blocks)),
+	}
+
+	for i, block := range docxContent.Blocks {
 		content.Blocks[i] = ContentBlock{
 			ID:      block.ID,
 			Type:    BlockType(block.Type),

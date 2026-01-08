@@ -1,6 +1,6 @@
 # DocuIndex
 
-Pure Go package for parsing PDF files into AI-searchable format.
+Pure Go package for parsing PDF and DOCX files into AI-searchable format.
 
 ## Project Structure
 
@@ -32,6 +32,18 @@ docuindex/
 │       ├── standard.go   # Adobe Standard + PDFDoc encoding
 │       └── glyphnames.go # Adobe Glyph List mappings
 │
+├── docx/               # Pure Go DOCX parser
+│   ├── document.go    # ZIP/document loader, file access
+│   ├── types.go       # XML structs + content block types
+│   ├── styles.go      # Style parsing and resolution
+│   ├── numbering.go   # List/numbering definitions
+│   ├── relationships.go # .rels file parsing (images, links)
+│   ├── text.go        # Text extraction from paragraphs/runs
+│   ├── image.go       # Image extraction from word/media/
+│   ├── table.go       # Table content extraction
+│   ├── metadata.go    # docProps/core.xml + app.xml
+│   └── semantic.go    # SemanticExtractor orchestrator
+│
 ├── storage/            # Document storage
 │   ├── store.go       # Store interface
 │   └── filesystem.go  # File system implementation
@@ -52,12 +64,13 @@ docuindex/
 
 ## Key Design Decisions
 
-1. **Pure Go**: No CGO, no external PDF libraries - implements PDF parsing from scratch
-2. **PostScript interpreter**: Proper content stream parsing with stack-based interpreter
-3. **AI-optimized output**: Semantic blocks with context, positions, and metadata
-4. **Thread-safe**: Concurrent document processing with `sync.RWMutex`
-5. **Pluggable storage**: Interface-based storage layer for flexibility
-6. **Security limits**: Memory and recursion limits to prevent DoS attacks
+1. **Pure Go**: No CGO, no external libraries - implements PDF and DOCX parsing from scratch using only standard library
+2. **PostScript interpreter**: Proper PDF content stream parsing with stack-based interpreter
+3. **DOCX via ZIP+XML**: DOCX files parsed as ZIP archives with XML content using `archive/zip` and `encoding/xml`
+4. **AI-optimized output**: Semantic blocks with context, positions, and metadata
+5. **Thread-safe**: Concurrent document processing with `sync.RWMutex`
+6. **Pluggable storage**: Interface-based storage layer for flexibility
+7. **Security limits**: Memory and recursion limits to prevent DoS attacks
 
 ## Core Types
 
@@ -93,11 +106,13 @@ Each indexed document is stored in a UUID folder:
 // Create a new store
 store, err := docuindex.NewStore("/path/to/data")
 
-// Index a document from file
+// Index a document from file (PDF or DOCX)
 doc, err := store.IndexDocument("/path/to/file.pdf")
+doc, err := store.IndexDocument("/path/to/file.docx")
 
 // Index from io.Reader
 doc, err := store.IndexReader(reader, "filename.pdf")
+doc, err := store.IndexReader(reader, "filename.docx")
 
 // Search across all documents
 results, err := store.Search("query terms", docuindex.WithMaxResults(10))
@@ -157,11 +172,13 @@ go test -race ./...  # Verify thread safety
 
 ```bash
 cd testApp
-go run main.go index /path/to/file.pdf
+go run main.go index /path/to/file.pdf   # Index PDF
+go run main.go index /path/to/file.docx  # Index DOCX
 go run main.go search "query terms"
 go run main.go list
 go run main.go info <doc-id>
-go run main.go full-test /path/to/file.pdf  # Run all tests
+go run main.go full-test /path/to/file.pdf   # Run all tests with PDF
+go run main.go full-test /path/to/file.docx  # Run all tests with DOCX
 ```
 
 ## PDF Operators Implemented
@@ -203,6 +220,43 @@ go run main.go full-test /path/to/file.pdf  # Run all tests
 - ToUnicode CMap parsing
 - Encoding Differences arrays
 
+## DOCX Features Supported
+
+### Document Structure
+- ZIP archive parsing via `archive/zip`
+- XML content parsing via `encoding/xml`
+- word/document.xml - Main content
+- word/styles.xml - Style definitions with inheritance
+- word/numbering.xml - List/numbering definitions
+- word/_rels/document.xml.rels - Relationship files
+- docProps/core.xml - Dublin Core metadata
+- docProps/app.xml - Application properties (page count, word count)
+
+### Content Extraction
+- Paragraphs with text runs
+- Style-based heading detection (Heading1-9)
+- Font-based heading detection (size, bold)
+- Bullet and numbered lists via numbering.xml
+- Tables with row/column structure
+- Inline and anchored images from word/media/
+- Hyperlinks and bookmarks
+- Field instructions (instrText) for TOC, page numbers
+
+### Style Resolution
+- Style inheritance chain (basedOn)
+- Default paragraph/run properties (docDefaults)
+- Merged properties from style hierarchy
+
+### Image Formats
+- JPEG, PNG, GIF, BMP, TIFF
+- EMU to points conversion for dimensions
+- Vector formats (EMF, WMF) detected but skipped
+
+### Position Estimation
+- Page estimation based on paragraph count
+- BoundingBox with estimated Y position
+- Letter page size (612x792 points) assumed
+
 ## Search Features
 
 - **Full-text search**: Inverted index with term positions
@@ -223,10 +277,15 @@ go run main.go full-test /path/to/file.pdf  # Run all tests
 | Modify search ranking | `search/ranking.go` |
 | Add new font type | `pdf/font.go` loadFont() |
 | Modify tokenization | `search/tokenizer.go` |
+| Add new DOCX element | `docx/types.go` XML structs |
+| Modify DOCX style resolution | `docx/styles.go` |
+| Add DOCX content extraction | `docx/text.go` or `docx/semantic.go` |
 
 ## Dependencies
 
 Standard library only:
+- `archive/zip` - DOCX ZIP archive reading
+- `encoding/xml` - DOCX XML parsing
 - `compress/zlib` - FlateDecode decompression
 - `compress/lzw` - LZW decompression
 - `encoding/binary` - Binary data handling
@@ -238,22 +297,25 @@ Standard library only:
 
 ### Sentinel Errors (`errors.go`)
 - `ErrInvalidPDF`, `ErrCorruptedPDF` - Malformed PDF structure
+- `ErrInvalidDOCX`, `ErrCorruptedDOCX`, `ErrMissingContent` - Malformed DOCX structure
 - `ErrEncryptedPDF` - Encrypted PDFs not supported
 - `ErrUnsupportedFeature`, `ErrUnsupportedEncoding` - Unimplemented features
 - `ErrDocumentNotFound`, `ErrDocumentExists` - Storage errors
 - `ErrSearchFailed`, `ErrInvalidQuery` - Search errors
 
 ### Structured Error Types
-- `ParseError` - Offset + operation context
-- `ObjectError` - Object number/generation
+- `ParseError` - PDF offset + operation context
+- `ObjectError` - PDF object number/generation
 - `PageError` - Page-specific errors
 - `StreamError` - Filter decoding errors
 - `FontError` - Font processing errors
+- `DOCXError` - DOCX part + message
 - `StorageError`, `SearchError` - Operation failures
 
 ### Error Checking
 ```go
 if docuindex.IsParseError(err) { ... }
+if docuindex.IsDOCXError(err) { ... }
 if docuindex.IsStorageError(err) { ... }
 if docuindex.IsSearchError(err) { ... }
 ```
@@ -282,7 +344,8 @@ if docuindex.IsSearchError(err) { ... }
 
 ## Current Limitations
 
-- DOCX support not yet implemented
 - Encrypted PDFs not supported
 - JBIG2Decode filter is a stub
 - CCITTFaxDecode has limited support
+- DOCX position estimation is approximate (no exact positions like PDF)
+- DOCX vector images (EMF, WMF) are skipped

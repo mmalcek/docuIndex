@@ -1,13 +1,14 @@
 # DocuIndex
 
-A pure Go package for parsing PDF files and extracting structured content optimized for AI search and RAG (Retrieval-Augmented Generation) applications.
+A pure Go package for parsing PDF and DOCX files and extracting structured content optimized for AI search and RAG (Retrieval-Augmented Generation) applications.
 
 ## Features
 
-- **Pure Go** - No CGO or external dependencies
+- **Pure Go** - No CGO or external dependencies, standard library only
 - **PDF Parsing** - Complete PDF parser with PostScript content stream interpreter
+- **DOCX Parsing** - Full DOCX support via ZIP/XML parsing with style resolution
 - **Text Extraction** - Extract text with positioning, font info, and semantic structure
-- **Image Extraction** - Extract embedded images (JPEG, PNG)
+- **Image Extraction** - Extract embedded images (JPEG, PNG, GIF, BMP, TIFF)
 - **Semantic Analysis** - Automatic heading detection, section tracking, keyword extraction
 - **Full-Text Search** - BM25-based search with boolean queries, phrase matching, and context windows for RAG
 - **Thread-Safe** - Safe for concurrent use
@@ -39,8 +40,9 @@ func main() {
     }
     defer store.Close()
 
-    // Index a PDF file
-    doc, err := store.IndexDocument("./document.pdf")
+    // Index a PDF or DOCX file
+    doc, err := store.IndexDocument("./document.pdf")   // PDF
+    // doc, err := store.IndexDocument("./document.docx") // DOCX
     if err != nil {
         log.Fatal(err)
     }
@@ -81,12 +83,16 @@ store, err := docuindex.NewStore("./data",
 #### Index Documents
 
 ```go
-// Index from file path
+// Index from file path (PDF or DOCX)
 doc, err := store.IndexDocument("./document.pdf")
+doc, err := store.IndexDocument("./document.docx")
 
 // Index from io.Reader
 file, _ := os.Open("document.pdf")
 doc, err := store.IndexReader(file, "document.pdf")
+
+file, _ := os.Open("document.docx")
+doc, err := store.IndexReader(file, "document.docx")
 
 // With custom name
 doc, err := store.IndexDocument("./document.pdf",
@@ -280,11 +286,26 @@ fmt.Printf("Index terms: %d\n", stats.IndexTerms)
 - Content stream operators for text positioning and graphics state
 - Embedded images (DCTDecode/JPEG, PNG)
 
+## Supported DOCX Features
+
+- Full ZIP archive parsing via standard library
+- XML content parsing with namespace handling
+- Style-based and font-based heading detection
+- Style inheritance chain resolution
+- Bullet and numbered list extraction
+- Table content with row/column structure
+- Inline and anchored image extraction (JPEG, PNG, GIF, BMP, TIFF)
+- Dublin Core metadata (title, author, keywords)
+- Application properties (page count, word count)
+- Field instructions (TOC, page numbers, hyperlinks)
+- Position estimation for search result context
+
 ## Limitations
 
 - Encrypted PDFs are not supported
-- DOCX support is planned but not yet implemented
-- JBIG2Decode and CCITTFaxDecode filters have limited support
+- JBIG2Decode and CCITTFaxDecode PDF filters have limited support
+- DOCX position estimation is approximate (DOCX lacks exact positioning unlike PDF)
+- DOCX vector images (EMF, WMF) are detected but skipped
 
 ## License
 

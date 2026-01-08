@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	dataDir   = "./test_data"
-	samplePDF = "./samples" // Directory for sample PDFs
+	dataDir    = "./test_data"
+	sampleDocs = "./samples" // Directory for sample documents (PDF/DOCX)
 )
 
 func main() {
@@ -32,8 +32,8 @@ func main() {
 	switch command {
 	case "index":
 		if len(os.Args) < 3 {
-			fmt.Println("Error: Please provide a PDF file path")
-			fmt.Println("Usage: testApp index <pdf_file>")
+			fmt.Println("Error: Please provide a document file path (PDF or DOCX)")
+			fmt.Println("Usage: testApp index <file>")
 			os.Exit(1)
 		}
 		runIndexTest(os.Args[2])
@@ -70,8 +70,8 @@ func main() {
 
 	case "full-test":
 		if len(os.Args) < 3 {
-			fmt.Println("Error: Please provide a PDF file path")
-			fmt.Println("Usage: testApp full-test <pdf_file>")
+			fmt.Println("Error: Please provide a document file path (PDF or DOCX)")
+			fmt.Println("Usage: testApp full-test <file>")
 			os.Exit(1)
 		}
 		runFullTest(os.Args[2])
@@ -90,14 +90,16 @@ func printUsage() {
 	fmt.Println("Usage: testApp <command> [arguments]")
 	fmt.Println()
 	fmt.Println("Commands:")
-	fmt.Println("  index <pdf_file>      Index a PDF file")
+	fmt.Println("  index <file>          Index a document (PDF or DOCX)")
 	fmt.Println("  search <query>        Search indexed documents")
 	fmt.Println("  list                  List all indexed documents")
 	fmt.Println("  info <doc_id>         Show document information")
 	fmt.Println("  delete <doc_id>       Delete a document from the store")
 	fmt.Println("  stats                 Show store statistics")
-	fmt.Println("  full-test <pdf_file>  Run full test suite with a PDF")
+	fmt.Println("  full-test <file>      Run full test suite with a document")
 	fmt.Println("  cleanup               Remove all test data")
+	fmt.Println()
+	fmt.Println("Supported formats: PDF, DOCX")
 }
 
 func createStore() (*docuindex.Store, error) {
@@ -119,13 +121,23 @@ func createStore() (*docuindex.Store, error) {
 	return store, nil
 }
 
-func runIndexTest(pdfPath string) {
-	fmt.Printf("Indexing PDF: %s\n", pdfPath)
+func runIndexTest(filePath string) {
+	// Detect format
+	ext := strings.ToLower(filepath.Ext(filePath))
+	formatName := "Document"
+	switch ext {
+	case ".pdf":
+		formatName = "PDF"
+	case ".docx":
+		formatName = "DOCX"
+	}
+
+	fmt.Printf("Indexing %s: %s\n", formatName, filePath)
 	fmt.Println(strings.Repeat("-", 50))
 
 	// Verify file exists
-	if _, err := os.Stat(pdfPath); os.IsNotExist(err) {
-		log.Fatalf("Error: File not found: %s", pdfPath)
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		log.Fatalf("Error: File not found: %s", filePath)
 	}
 
 	store, err := createStore()
@@ -135,10 +147,13 @@ func runIndexTest(pdfPath string) {
 	defer store.Close()
 
 	// Index the document
-	doc, err := store.IndexDocument(pdfPath)
+	doc, err := store.IndexDocument(filePath)
 	if err != nil {
 		if docuindex.IsParseError(err) {
 			log.Fatalf("PDF Parse Error: %v", err)
+		}
+		if docuindex.IsDOCXError(err) {
+			log.Fatalf("DOCX Parse Error: %v", err)
 		}
 		log.Fatalf("Error indexing document: %v", err)
 	}
@@ -240,7 +255,7 @@ func runListDocuments() {
 
 	if len(docs) == 0 {
 		fmt.Println("No documents indexed yet.")
-		fmt.Println("Use 'testApp index <pdf_file>' to index a PDF.")
+		fmt.Println("Use 'testApp index <file>' to index a document (PDF or DOCX).")
 		return
 	}
 
@@ -519,17 +534,20 @@ func truncateString(s string, maxLen int) string {
 	return s
 }
 
-// findPDFFiles searches for PDF files in a directory
-func findPDFFiles(dir string) ([]string, error) {
-	var pdfs []string
+// findDocumentFiles searches for supported document files (PDF, DOCX) in a directory
+func findDocumentFiles(dir string) ([]string, error) {
+	var docs []string
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".pdf") {
-			pdfs = append(pdfs, path)
+		if !info.IsDir() {
+			ext := strings.ToLower(filepath.Ext(info.Name()))
+			if ext == ".pdf" || ext == ".docx" {
+				docs = append(docs, path)
+			}
 		}
 		return nil
 	})
-	return pdfs, err
+	return docs, err
 }

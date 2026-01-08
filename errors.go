@@ -13,6 +13,11 @@ var (
 	ErrUnsupportedVersion = errors.New("unsupported PDF version")
 	ErrEncryptedPDF       = errors.New("encrypted PDF not supported")
 
+	// DOCX parsing errors
+	ErrInvalidDOCX    = errors.New("invalid DOCX file")
+	ErrCorruptedDOCX  = errors.New("corrupted DOCX structure")
+	ErrMissingContent = errors.New("missing document.xml in DOCX")
+
 	// Feature errors
 	ErrUnsupportedFeature  = errors.New("unsupported PDF feature")
 	ErrUnsupportedEncoding = errors.New("unsupported text encoding")
@@ -211,6 +216,39 @@ func NewSearchError(query, message string, err error) *SearchError {
 		Message: message,
 		Err:     err,
 	}
+}
+
+// DOCXError indicates a DOCX parsing or processing error
+type DOCXError struct {
+	Part    string // Which part of the DOCX (e.g., "word/document.xml")
+	Message string // What went wrong
+	Err     error  // Underlying error
+}
+
+func (e *DOCXError) Error() string {
+	if e.Part != "" {
+		return fmt.Sprintf("DOCX %s: %s", e.Part, e.Message)
+	}
+	return fmt.Sprintf("DOCX: %s", e.Message)
+}
+
+func (e *DOCXError) Unwrap() error {
+	return e.Err
+}
+
+// NewDOCXError creates a new DOCXError
+func NewDOCXError(part, message string, err error) *DOCXError {
+	return &DOCXError{
+		Part:    part,
+		Message: message,
+		Err:     err,
+	}
+}
+
+// IsDOCXError checks if an error is a DOCX error
+func IsDOCXError(err error) bool {
+	var docxErr *DOCXError
+	return errors.As(err, &docxErr)
 }
 
 // IsParseError checks if an error is a PDF parsing error
