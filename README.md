@@ -2,6 +2,8 @@
 
 A pure Go package for parsing PDF and DOCX files and extracting structured content optimized for AI search and RAG (Retrieval-Augmented Generation) applications.
 
+** This package is under very active development. Expect frequent updates and improvements. Not yet stable. **
+
 ## Features
 
 - **Pure Go** - No CGO or external dependencies, standard library only
