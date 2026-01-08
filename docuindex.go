@@ -104,6 +104,17 @@ func (s *Store) SetEmbeddingProvider(provider embedding.Provider) error {
 	return nil
 }
 
+// pendingImage holds image data to be saved after document creation
+type pendingImage struct {
+	Data       []byte
+	Format     string
+	Width      int
+	Height     int
+	Page       int
+	Name       string
+	BlockIndex int // Index in content.Blocks to update
+}
+
 // IndexDocument indexes a document from a file path
 func (s *Store) IndexDocument(path string, opts ...IndexOption) (*Document, error) {
 	s.mu.Lock()
@@ -119,13 +130,14 @@ func (s *Store) IndexDocument(path string, opts ...IndexOption) (*Document, erro
 	// Detect format
 	ext := strings.ToLower(filepath.Ext(path))
 	var doc *Document
+	var pendingImages []pendingImage
 	var err error
 
 	switch ext {
 	case ".pdf":
-		doc, err = s.indexPDF(path, config)
+		doc, pendingImages, err = s.indexPDF(path, config)
 	case ".docx":
-		doc, err = s.indexDOCX(path, config)
+		doc, pendingImages, err = s.indexDOCX(path, config)
 	default:
 		return nil, fmt.Errorf("unsupported file format: %s", ext)
 	}
@@ -134,9 +146,21 @@ func (s *Store) IndexDocument(path string, opts ...IndexOption) (*Document, erro
 		return nil, err
 	}
 
-	// Save to SQLite
+	// Save to SQLite (document must exist before images due to FK constraint)
 	if err := s.db.SaveDocument(toSQLiteDocument(doc)); err != nil {
 		return nil, fmt.Errorf("save document: %w", err)
+	}
+
+	// Now save images (after document exists in DB)
+	for _, img := range pendingImages {
+		imageID, err := s.db.SaveImage(doc.Info.ID, img.Data, img.Format, img.Width, img.Height, img.Page, img.Name, "")
+		if err != nil {
+			continue // Skip failed images
+		}
+		// Update content block reference
+		if img.BlockIndex >= 0 && img.BlockIndex < len(doc.Content.Blocks) {
+			doc.Content.Blocks[img.BlockIndex].Content = fmt.Sprintf("images/%s", imageID)
+		}
 	}
 
 	// Index for BM25 search
@@ -224,22 +248,22 @@ func (s *Store) embedDocument(doc *Document) error {
 }
 
 // indexPDF indexes a PDF file
-func (s *Store) indexPDF(path string, config *indexConfig) (*Document, error) {
+func (s *Store) indexPDF(path string, config *indexConfig) (*Document, []pendingImage, error) {
 	pdfDoc, err := pdf.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("open PDF: %w", err)
+		return nil, nil, fmt.Errorf("open PDF: %w", err)
 	}
 	defer pdfDoc.Close()
 
 	if pdfDoc.IsEncrypted() {
-		return nil, ErrEncryptedPDF
+		return nil, nil, ErrEncryptedPDF
 	}
 
 	docID := generateID()
 
 	fileInfo, err := os.Stat(path)
 	if err != nil {
-		return nil, fmt.Errorf("stat file: %w", err)
+		return nil, nil, fmt.Errorf("stat file: %w", err)
 	}
 
 	var checksum string
@@ -255,12 +279,13 @@ func (s *Store) indexPDF(path string, config *indexConfig) (*Document, error) {
 	extractor := pdf.NewSemanticExtractor(pdfDoc)
 	pdfContent, err := extractor.ExtractContent()
 	if err != nil {
-		return nil, fmt.Errorf("extract content: %w", err)
+		return nil, nil, fmt.Errorf("extract content: %w", err)
 	}
 
 	content := convertPDFContent(pdfContent)
 
-	// Extract and save images if enabled
+	// Collect images to be saved later (after document is in DB)
+	var pending []pendingImage
 	if s.config.ExtractImages {
 		imageExtractor := pdf.NewImageExtractor(pdfDoc)
 		for pageNum := 1; pageNum <= pageCount; pageNum++ {
@@ -270,19 +295,26 @@ func (s *Store) indexPDF(path string, config *indexConfig) (*Document, error) {
 			}
 
 			for _, img := range images {
-				imageID, err := s.db.SaveImage(docID, img.Data, img.Format, 0, 0, pageNum, img.Name, "")
-				if err != nil {
-					continue
-				}
-
-				// Update content block references to images
+				// Find the matching content block index
+				blockIndex := -1
 				for j := range content.Blocks {
 					if content.Blocks[j].Type == BlockTypeImage &&
 						content.Blocks[j].Content == img.Name &&
 						content.Blocks[j].Page == pageNum {
-						content.Blocks[j].Content = fmt.Sprintf("images/%s", imageID)
+						blockIndex = j
+						break
 					}
 				}
+
+				pending = append(pending, pendingImage{
+					Data:       img.Data,
+					Format:     img.Format,
+					Width:      img.Width,
+					Height:     img.Height,
+					Page:       pageNum,
+					Name:       img.Name,
+					BlockIndex: blockIndex,
+				})
 			}
 		}
 	}
@@ -307,14 +339,14 @@ func (s *Store) indexPDF(path string, config *indexConfig) (*Document, error) {
 		Content: content,
 	}
 
-	return doc, nil
+	return doc, pending, nil
 }
 
 // indexDOCX indexes a DOCX file
-func (s *Store) indexDOCX(path string, config *indexConfig) (*Document, error) {
+func (s *Store) indexDOCX(path string, config *indexConfig) (*Document, []pendingImage, error) {
 	docxDoc, err := docx.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("open DOCX: %w", err)
+		return nil, nil, fmt.Errorf("open DOCX: %w", err)
 	}
 	defer docxDoc.Close()
 
@@ -322,7 +354,7 @@ func (s *Store) indexDOCX(path string, config *indexConfig) (*Document, error) {
 
 	fileInfo, err := os.Stat(path)
 	if err != nil {
-		return nil, fmt.Errorf("stat file: %w", err)
+		return nil, nil, fmt.Errorf("stat file: %w", err)
 	}
 
 	var checksum string
@@ -337,35 +369,43 @@ func (s *Store) indexDOCX(path string, config *indexConfig) (*Document, error) {
 
 	extractor, err := docx.NewSemanticExtractor(docxDoc)
 	if err != nil {
-		return nil, fmt.Errorf("create extractor: %w", err)
+		return nil, nil, fmt.Errorf("create extractor: %w", err)
 	}
 
 	docxContent, err := extractor.ExtractContent()
 	if err != nil {
-		return nil, fmt.Errorf("extract content: %w", err)
+		return nil, nil, fmt.Errorf("extract content: %w", err)
 	}
 
 	content := convertDOCXContent(docxContent)
 
-	// Extract and save images if enabled
+	// Collect images to be saved later (after document is in DB)
+	var pending []pendingImage
 	if s.config.ExtractImages {
 		imageExtractor, err := docx.NewImageExtractor(docxDoc)
 		if err == nil {
 			images, err := imageExtractor.ExtractAllImages()
 			if err == nil {
 				for _, img := range images {
-					imageID, err := s.db.SaveImage(docID, img.Data, img.Format, 0, 0, 0, img.Name, "")
-					if err != nil {
-						continue
-					}
-
-					// Update content block references
+					// Find the matching content block index
+					blockIndex := -1
 					for j := range content.Blocks {
 						if content.Blocks[j].Type == BlockTypeImage &&
 							content.Blocks[j].Content == img.Name {
-							content.Blocks[j].Content = fmt.Sprintf("images/%s", imageID)
+							blockIndex = j
+							break
 						}
 					}
+
+					pending = append(pending, pendingImage{
+						Data:       img.Data,
+						Format:     img.Format,
+						Width:      0,
+						Height:     0,
+						Page:       0,
+						Name:       img.Name,
+						BlockIndex: blockIndex,
+					})
 				}
 			}
 		}
@@ -391,7 +431,7 @@ func (s *Store) indexDOCX(path string, config *indexConfig) (*Document, error) {
 		Content: content,
 	}
 
-	return doc, nil
+	return doc, pending, nil
 }
 
 // IndexCustomData indexes custom structured data
