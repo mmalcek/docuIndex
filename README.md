@@ -9,7 +9,7 @@ A pure Go package for parsing PDF files and extracting structured content optimi
 - **Text Extraction** - Extract text with positioning, font info, and semantic structure
 - **Image Extraction** - Extract embedded images (JPEG, PNG)
 - **Semantic Analysis** - Automatic heading detection, section tracking, keyword extraction
-- **Full-Text Search** - BM25-based search with context windows for RAG
+- **Full-Text Search** - BM25-based search with boolean queries, phrase matching, and context windows for RAG
 - **Thread-Safe** - Safe for concurrent use
 - **Persistent Storage** - JSON-based storage with automatic indexing
 
@@ -70,10 +70,11 @@ store, err := docuindex.NewStore("./data")
 
 // With options
 store, err := docuindex.NewStore("./data",
-    docuindex.WithExtractImages(true),      // Extract images from PDFs
-    docuindex.WithComputeChecksum(true),    // Compute SHA-256 checksums
-    docuindex.WithEnableStemming(true),     // Enable word stemming for search
-    docuindex.WithEnableStopWords(true),    // Filter common stop words
+    docuindex.WithImageExtraction(true),    // Extract images from PDFs
+    docuindex.WithChecksum(true),           // Compute SHA-256 checksums
+    docuindex.WithSemanticAnalysis(true),   // Enable heading/section detection
+    docuindex.WithStemming(true),           // Enable Porter stemming for search
+    docuindex.WithStopWords(true),          // Filter common stop words
 )
 ```
 
@@ -89,7 +90,7 @@ doc, err := store.IndexReader(file, "document.pdf")
 
 // With custom name
 doc, err := store.IndexDocument("./document.pdf",
-    docuindex.WithDocumentName("My Custom Name"),
+    docuindex.WithName("My Custom Name"),
 )
 ```
 
@@ -136,6 +137,17 @@ results, err := store.Search("neural networks",
 )
 ```
 
+#### Boolean and Phrase Queries
+
+```go
+// Boolean operators: AND, OR, NOT (or +, -)
+results, err := store.Search("machine learning AND neural")
+results, err := store.Search("+required -excluded optional")
+
+// Phrase matching with quotes
+results, err := store.Search(`"exact phrase match"`)
+```
+
 #### Search in Specific Document
 
 ```go
@@ -159,11 +171,11 @@ Each indexed document is stored with the following structure:
 
 ```
 {uuid}/
-├── info.json      # Document metadata
-├── content.json   # Structured content blocks
+├── document.json  # Document metadata + content blocks
+├── index.json     # Search index
 └── images/        # Extracted images (if enabled)
-    ├── img_001_001.jpg
-    └── img_001_001.json
+    ├── img_001.png
+    └── img_001.json
 ```
 
 #### Content Block
@@ -210,53 +222,50 @@ fmt.Printf("Index terms: %d\n", stats.IndexTerms)
 
 ## Storage Format
 
-### info.json
+### document.json
 
 ```json
 {
-  "id": "abc123...",
-  "name": "document.pdf",
-  "original_path": "/path/to/document.pdf",
-  "size_bytes": 1234567,
-  "page_count": 42,
-  "format": "pdf",
-  "checksum": "sha256:...",
-  "created_at": "2024-01-08T10:30:00Z",
-  "updated_at": "2024-01-08T10:30:00Z"
-}
-```
-
-### content.json
-
-```json
-{
-  "version": "1.0",
-  "blocks": [
-    {
-      "id": "blk_001",
-      "type": "heading",
-      "content": "Chapter 1: Introduction",
-      "page": 1,
-      "bbox": {
-        "x": 72,
-        "y": 720,
-        "width": 400,
-        "height": 24,
-        "page_width": 612,
-        "page_height": 792
-      },
-      "font": {
-        "name": "Helvetica-Bold",
-        "size": 18,
-        "bold": true
-      },
-      "semantic": {
-        "is_heading": true,
-        "heading_level": 1,
-        "keywords": ["introduction", "chapter"]
+  "info": {
+    "id": "abc123...",
+    "name": "document.pdf",
+    "original_path": "/path/to/document.pdf",
+    "size_bytes": 1234567,
+    "page_count": 42,
+    "format": "pdf",
+    "checksum": "sha256:...",
+    "created_at": "2024-01-08T10:30:00Z",
+    "updated_at": "2024-01-08T10:30:00Z"
+  },
+  "content": {
+    "version": "1.0",
+    "blocks": [
+      {
+        "id": "blk_001",
+        "type": "heading",
+        "content": "Chapter 1: Introduction",
+        "page": 1,
+        "bbox": {
+          "x": 72,
+          "y": 720,
+          "width": 400,
+          "height": 24,
+          "page_width": 612,
+          "page_height": 792
+        },
+        "font": {
+          "name": "Helvetica-Bold",
+          "size": 18,
+          "bold": true
+        },
+        "semantic": {
+          "is_heading": true,
+          "heading_level": 1,
+          "keywords": ["introduction", "chapter"]
+        }
       }
-    }
-  ]
+    ]
+  }
 }
 ```
 
@@ -264,17 +273,18 @@ fmt.Printf("Index terms: %d\n", stats.IndexTerms)
 
 - PDF 1.0 - 1.7
 - Traditional and cross-reference stream xref tables
-- Stream filters: FlateDecode, ASCIIHexDecode, ASCII85Decode, LZWDecode
-- Embedded fonts with encoding support (WinAnsi, MacRoman, Standard)
+- Stream filters: FlateDecode, ASCIIHexDecode, ASCII85Decode, LZWDecode, RunLengthDecode
+- Font types: Type1, TrueType, Type0 (CID), Type3
+- Encoding support: WinAnsi, MacRoman, Standard, PDFDocEncoding
 - ToUnicode CMap for proper character mapping
-- Content stream operators for text positioning
+- Content stream operators for text positioning and graphics state
 - Embedded images (DCTDecode/JPEG, PNG)
 
 ## Limitations
 
 - Encrypted PDFs are not supported
 - DOCX support is planned but not yet implemented
-- Some complex PDF features (Type 3 fonts, advanced color spaces) may have limited support
+- JBIG2Decode and CCITTFaxDecode filters have limited support
 
 ## License
 
