@@ -1,6 +1,6 @@
 # DocuIndex
 
-Pure Go package for parsing PDF and DOCX files into AI-searchable format.
+Pure Go package for parsing PDF and DOCX files into AI-searchable format with unified SQLite storage and optional semantic search via embeddings.
 
 ## Project Structure
 
@@ -44,15 +44,31 @@ docuindex/
 │   ├── metadata.go    # docProps/core.xml + app.xml
 │   └── semantic.go    # SemanticExtractor orchestrator
 │
-├── storage/            # Document storage
-│   ├── store.go       # Store interface
-│   └── filesystem.go  # File system implementation
+├── sqlite/             # Unified SQLite storage
+│   ├── store.go       # SQLiteStore implementation
+│   ├── schema.go      # Database schema and migrations
+│   ├── documents.go   # Document CRUD operations
+│   ├── blocks.go      # Content block operations
+│   ├── search.go      # BM25 search on SQLite
+│   ├── vectors.go     # Vector storage as BLOBs
+│   └── images.go      # Image metadata + file management
+│
+├── embedding/          # Embedding providers
+│   ├── provider.go    # Provider interface + factory
+│   ├── azure.go       # Azure OpenAI provider
+│   ├── openai.go      # OpenAI provider
+│   └── ollama.go      # Ollama local provider
+│
+├── vectorindex/        # HNSW approximate nearest neighbor
+│   └── hnsw.go        # Pure Go HNSW implementation
 │
 ├── search/             # Search functionality
-│   ├── index.go       # Inverted index
+│   ├── index.go       # Inverted index (legacy, for reference)
 │   ├── tokenizer.go   # Text tokenization with Porter stemming
 │   ├── query.go       # Query parsing (boolean, phrase)
-│   └── ranking.go     # BM25 ranking with boosting
+│   ├── ranking.go     # BM25 ranking with boosting
+│   ├── hybrid.go      # Hybrid BM25 + vector search
+│   └── fusion.go      # RRF score fusion
 │
 ├── cmd/                # CLI tools
 │   └── test_pdf/
@@ -64,13 +80,92 @@ docuindex/
 
 ## Key Design Decisions
 
-1. **Pure Go**: No CGO, no external libraries - implements PDF and DOCX parsing from scratch using only standard library
-2. **PostScript interpreter**: Proper PDF content stream parsing with stack-based interpreter
-3. **DOCX via ZIP+XML**: DOCX files parsed as ZIP archives with XML content using `archive/zip` and `encoding/xml`
-4. **AI-optimized output**: Semantic blocks with context, positions, and metadata
-5. **Thread-safe**: Concurrent document processing with `sync.RWMutex`
-6. **Pluggable storage**: Interface-based storage layer for flexibility
-7. **Security limits**: Memory and recursion limits to prevent DoS attacks
+1. **Pure Go**: No CGO, no external libraries - implements PDF, DOCX parsing, SQLite (modernc.org/sqlite), and HNSW from scratch
+2. **Unified SQLite Storage**: Single `docuindex.db` file for all metadata (documents, blocks, search index, vectors)
+3. **PostScript interpreter**: Proper PDF content stream parsing with stack-based interpreter
+4. **DOCX via ZIP+XML**: DOCX files parsed as ZIP archives with XML content using `archive/zip` and `encoding/xml`
+5. **AI-optimized output**: Semantic blocks with context, positions, and metadata
+6. **Hybrid Search**: BM25 keyword search + optional vector semantic search with RRF fusion
+7. **Optional Embeddings**: Embedding providers (Azure, OpenAI, Ollama) are optional - works without them
+8. **Thread-safe**: Concurrent document processing with `sync.RWMutex`
+9. **Security limits**: Memory and recursion limits to prevent DoS attacks
+
+## Architecture
+
+### Storage Layout
+
+```
+data/
+├── docuindex.db           # Single SQLite database (all metadata)
+├── hnsw.idx               # HNSW index file (binary, rebuilt on startup)
+└── images/                # All images with UUID names
+    ├── a1b2c3d4-e5f6-7890-abcd-ef1234567890.png
+    └── ...
+```
+
+### Database Schema
+
+```sql
+-- Documents table
+CREATE TABLE documents (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    original_path TEXT,
+    format TEXT NOT NULL,
+    size_bytes INTEGER,
+    page_count INTEGER,
+    checksum TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- Content blocks table
+CREATE TABLE content_blocks (
+    id TEXT NOT NULL,
+    document_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    content TEXT,
+    page INTEGER,
+    sequence INTEGER,
+    -- Bounding box, font info, semantic info...
+    PRIMARY KEY (document_id, id),
+    FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+);
+
+-- BM25 inverted index
+CREATE TABLE search_terms (
+    term TEXT NOT NULL,
+    document_id TEXT NOT NULL,
+    block_id TEXT NOT NULL,
+    positions TEXT,
+    term_frequency REAL,
+    PRIMARY KEY (term, document_id, block_id)
+);
+
+-- Vector embeddings
+CREATE TABLE vectors (
+    block_id TEXT NOT NULL,
+    document_id TEXT NOT NULL,
+    vector BLOB NOT NULL,
+    text_hash TEXT,
+    model TEXT,
+    dimension INTEGER,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (document_id, block_id)
+);
+
+-- Image references
+CREATE TABLE images (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    block_id TEXT,
+    format TEXT NOT NULL,
+    width INTEGER,
+    height INTEGER,
+    page INTEGER,
+    original_name TEXT
+);
+```
 
 ## Core Types
 
@@ -86,24 +181,12 @@ docuindex/
 | `SemanticInfo` | AI-friendly metadata (headings, sections, keywords) |
 | `FontInfo` | Font name, size, bold, italic flags |
 | `ContextResult` | Before/Center/After blocks for RAG |
-
-## Storage Format
-
-Each indexed document is stored in a UUID folder:
-
-```
-{uuid}/
-├── document.json  # Document metadata + content blocks
-├── index.json     # Document-level search index
-└── images/        # Extracted images with metadata
-    ├── img_001.png
-    └── img_001.json
-```
+| `SearchMode` | Search type: keyword, semantic, or hybrid |
 
 ## Public API
 
 ```go
-// Create a new store
+// Create a new store (SQLite-backed)
 store, err := docuindex.NewStore("/path/to/data")
 
 // Index a document from file (PDF or DOCX)
@@ -112,10 +195,16 @@ doc, err := store.IndexDocument("/path/to/file.docx")
 
 // Index from io.Reader
 doc, err := store.IndexReader(reader, "filename.pdf")
-doc, err := store.IndexReader(reader, "filename.docx")
 
-// Search across all documents
+// Search across all documents (keyword search by default)
 results, err := store.Search("query terms", docuindex.WithMaxResults(10))
+
+// Hybrid search (requires embedding provider)
+results, err := store.Search("query terms",
+    docuindex.WithSearchMode(docuindex.SearchModeHybrid),
+    docuindex.WithVectorWeight(0.5),
+    docuindex.WithKeywordWeight(0.5),
+)
 
 // Search within specific document
 results, err := store.SearchInDocument(docID, "query")
@@ -134,6 +223,13 @@ err := store.DeleteDocument(docID)
 
 // Get store statistics
 stats := store.Stats()
+
+// Configure embedding provider (optional)
+provider, _ := embedding.NewProvider(embedding.Config{
+    Provider: "ollama",
+    Model:    "nomic-embed-text",
+})
+store.SetEmbeddingProvider(provider)
 ```
 
 ## Configuration Options
@@ -158,6 +254,34 @@ docuindex.WithHighlight(pre, post)     // Match highlighting markers
 docuindex.WithPageRange(start, end)    // Filter by page range
 docuindex.WithDocuments(...ids)        // Filter by document IDs
 docuindex.WithSections(...strings)     // Filter by section
+docuindex.WithSearchMode(mode)         // keyword, semantic, or hybrid
+docuindex.WithVectorWeight(float64)    // Weight for vector search (0-1)
+docuindex.WithKeywordWeight(float64)   // Weight for keyword search (0-1)
+```
+
+### Embedding Providers
+```go
+// Azure OpenAI
+provider, _ := embedding.NewProvider(embedding.Config{
+    Provider: "azure",
+    Endpoint: os.Getenv("AZURE_ENDPOINT"),
+    APIKey:   os.Getenv("AZURE_KEY"),
+    Model:    "text-embedding-3-small",
+})
+
+// OpenAI
+provider, _ := embedding.NewProvider(embedding.Config{
+    Provider: "openai",
+    APIKey:   os.Getenv("OPENAI_API_KEY"),
+    Model:    "text-embedding-3-small",
+})
+
+// Ollama (local)
+provider, _ := embedding.NewProvider(embedding.Config{
+    Provider: "ollama",
+    Endpoint: "http://localhost:11434",
+    Model:    "nomic-embed-text",
+})
 ```
 
 ## Build & Test
@@ -259,8 +383,9 @@ go run main.go full-test /path/to/file.docx  # Run all tests with DOCX
 
 ## Search Features
 
-- **Full-text search**: Inverted index with term positions
-- **BM25 ranking**: Industry-standard relevance scoring
+- **Full-text search**: BM25 on SQLite with inverted index
+- **Semantic search**: Vector similarity via HNSW (optional)
+- **Hybrid search**: Combined BM25 + vector with RRF fusion
 - **Boolean queries**: AND, OR, NOT operators (+, -, keywords)
 - **Phrase matching**: Quoted exact phrases
 - **Boosting**: Headings boosted 1.5x, exact matches boosted
@@ -274,24 +399,30 @@ go run main.go full-test /path/to/file.docx  # Run all tests with DOCX
 | Add new PDF operator | `pdf/content.go` operators map |
 | Add new encoding | `pdf/encoding/` directory |
 | Add new stream filter | `pdf/stream.go` decodeFilter() |
-| Modify search ranking | `search/ranking.go` |
+| Modify search ranking | `sqlite/search.go` |
 | Add new font type | `pdf/font.go` loadFont() |
-| Modify tokenization | `search/tokenizer.go` |
+| Modify tokenization | `sqlite/search.go` tokenize() |
 | Add new DOCX element | `docx/types.go` XML structs |
 | Modify DOCX style resolution | `docx/styles.go` |
 | Add DOCX content extraction | `docx/text.go` or `docx/semantic.go` |
+| Add embedding provider | `embedding/` directory |
+| Modify hybrid search fusion | `search/fusion.go` |
 
 ## Dependencies
 
-Standard library only:
+- `modernc.org/sqlite` - Pure Go SQLite driver
+- `github.com/google/uuid` - UUID generation for images
+
+Standard library:
 - `archive/zip` - DOCX ZIP archive reading
 - `encoding/xml` - DOCX XML parsing
 - `compress/zlib` - FlateDecode decompression
 - `compress/lzw` - LZW decompression
 - `encoding/binary` - Binary data handling
-- `encoding/json` - Document serialization
+- `encoding/json` - JSON serialization
 - `image/*` - Image encoding/decoding
 - `crypto/sha256` - Document checksums
+- `database/sql` - SQLite interface
 
 ## Error Handling
 
@@ -334,6 +465,7 @@ if docuindex.IsSearchError(err) { ... }
 - Multiple documents can be indexed concurrently
 - Search operations use read locks for parallel queries
 - Index updates use write locks
+- SQLite WAL mode enables concurrent reads
 
 ## Performance Considerations
 
@@ -341,6 +473,16 @@ if docuindex.IsSearchError(err) { ... }
 - Streaming: Large files processed without full memory load
 - Caching: Frequently accessed objects cached
 - Parallel: Multi-page extraction can run concurrently
+- HNSW: Approximate nearest neighbor for fast vector search
+- SQLite page cache: Reduced I/O for repeated queries
+
+## Scale Considerations
+
+| Block Count | Search Type | Expected Performance |
+|-------------|-------------|---------------------|
+| <10k | BM25 or Brute-force vector | <10ms |
+| 10k-100k | BM25 + HNSW | <50ms |
+| >100k | BM25 + HNSW (tuned) | May need optimization |
 
 ## Current Limitations
 

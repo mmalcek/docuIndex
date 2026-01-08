@@ -112,8 +112,11 @@ type searchConfig struct {
 	HighlightPre  string   // Prefix for highlighting matches
 	HighlightPost string   // Suffix for highlighting matches
 	PageRange     *struct{ Start, End int }
-	DocumentIDs   []string // Limit to specific documents
-	IncludeImages bool     // Include image blocks in results
+	DocumentIDs   []string   // Limit to specific documents
+	IncludeImages bool       // Include image blocks in results
+	SearchMode    SearchMode // Search mode: keyword, semantic, or hybrid
+	VectorWeight  float64    // Weight for vector search in hybrid mode
+	KeywordWeight float64    // Weight for keyword search in hybrid mode
 }
 
 func defaultSearchConfig() *searchConfig {
@@ -124,6 +127,9 @@ func defaultSearchConfig() *searchConfig {
 		HighlightPre:  "**",
 		HighlightPost: "**",
 		IncludeImages: false,
+		SearchMode:    SearchModeKeyword, // Default to keyword until embeddings configured
+		VectorWeight:  0.5,
+		KeywordWeight: 0.5,
 	}
 }
 
@@ -221,5 +227,42 @@ func WithSourcePath(path string) IndexOption {
 func WithName(name string) IndexOption {
 	return func(c *indexConfig) {
 		c.Name = name
+	}
+}
+
+// SearchMode defines the type of search
+type SearchMode string
+
+const (
+	// SearchModeKeyword uses BM25 keyword search only
+	SearchModeKeyword SearchMode = "keyword"
+	// SearchModeSemantic uses vector similarity search only
+	SearchModeSemantic SearchMode = "semantic"
+	// SearchModeHybrid combines BM25 and vector search with RRF fusion
+	SearchModeHybrid SearchMode = "hybrid"
+)
+
+// WithSearchMode sets the search mode (keyword, semantic, or hybrid)
+func WithSearchMode(mode SearchMode) SearchOption {
+	return func(c *searchConfig) {
+		c.SearchMode = mode
+	}
+}
+
+// WithVectorWeight sets the weight for vector search in hybrid mode (0-1)
+func WithVectorWeight(weight float64) SearchOption {
+	return func(c *searchConfig) {
+		if weight >= 0 && weight <= 1 {
+			c.VectorWeight = weight
+		}
+	}
+}
+
+// WithKeywordWeight sets the weight for keyword search in hybrid mode (0-1)
+func WithKeywordWeight(weight float64) SearchOption {
+	return func(c *searchConfig) {
+		if weight >= 0 && weight <= 1 {
+			c.KeywordWeight = weight
+		}
 	}
 }

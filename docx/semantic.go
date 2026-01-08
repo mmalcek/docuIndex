@@ -394,7 +394,7 @@ func isStopWord(word string) bool {
 
 // formatBlockID formats a block ID
 func formatBlockID(id int) string {
-	return fmt.Sprintf("blk_%03d", id)
+	return fmt.Sprintf("blk_%05d", id)
 }
 
 // isAllCaps checks if text is all uppercase letters

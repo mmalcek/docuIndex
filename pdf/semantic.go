@@ -1,6 +1,7 @@
 package pdf
 
 import (
+	"fmt"
 	"regexp"
 	"sort"
 	"strings"
@@ -408,17 +409,7 @@ func isStopWord(word string) bool {
 
 // formatBlockID formats a block ID
 func formatBlockID(id int) string {
-	return "blk_" + padInt(id, 3)
-}
-
-// padInt pads an integer with leading zeros
-func padInt(n, width int) string {
-	s := ""
-	for i := 0; i < width; i++ {
-		s = string(rune('0'+n%10)) + s
-		n /= 10
-	}
-	return s
+	return fmt.Sprintf("blk_%05d", id)
 }
 
 // isBoldFont checks if font name indicates bold

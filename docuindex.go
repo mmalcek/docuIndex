@@ -1,6 +1,7 @@
 package docuindex
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -11,20 +12,24 @@ import (
 	"time"
 
 	"github.com/mariomalcek/docuindex/docx"
+	"github.com/mariomalcek/docuindex/embedding"
 	"github.com/mariomalcek/docuindex/pdf"
-	"github.com/mariomalcek/docuindex/search"
-	"github.com/mariomalcek/docuindex/storage"
+	hsearch "github.com/mariomalcek/docuindex/search"
+	"github.com/mariomalcek/docuindex/sqlite"
+	"github.com/mariomalcek/docuindex/vectorindex"
 )
 
-// Store manages document storage, indexing, and search
+// Store manages document storage, indexing, and search with unified SQLite backend
 type Store struct {
-	config *storeConfig
-	mu     sync.RWMutex
-	fs     *storage.FileSystemStore
-	index  *search.Index
+	config   *storeConfig
+	mu       sync.RWMutex
+	db       *sqlite.Store
+	hnsw     *vectorindex.HNSW
+	embedder embedding.Provider
+	hybrid   *hsearch.HybridSearcher
 }
 
-// NewStore creates a new document store at the specified path
+// NewStore creates a new document store at the specified path using SQLite
 func NewStore(basePath string, opts ...StoreOption) (*Store, error) {
 	config := defaultStoreConfig()
 	config.BasePath = basePath
@@ -33,23 +38,70 @@ func NewStore(basePath string, opts ...StoreOption) (*Store, error) {
 		opt(config)
 	}
 
-	fs, err := storage.NewFileSystemStore(basePath)
+	// Create SQLite store
+	db, err := sqlite.NewStore(basePath,
+		sqlite.WithImageExtraction(config.ExtractImages),
+		sqlite.WithSemanticAnalysis(config.ExtractSemantics),
+		sqlite.WithChecksum(config.ComputeChecksum),
+		sqlite.WithStemming(config.EnableStemming),
+		sqlite.WithStopWords(config.EnableStopWords),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("create storage: %w", err)
+		return nil, fmt.Errorf("create SQLite store: %w", err)
 	}
 
 	s := &Store{
 		config: config,
-		fs:     fs,
-		index:  search.NewIndex(config.EnableStemming, config.EnableStopWords),
+		db:     db,
 	}
 
-	// Load existing index if present
-	if indexData, err := fs.GetIndex(); err == nil && indexData != nil {
-		s.index.Deserialize(indexData)
+	// Load or create HNSW index if embeddings are available
+	hnswPath := filepath.Join(basePath, "hnsw.idx")
+	s.hnsw = vectorindex.NewHNSW(nil)
+	if _, err := os.Stat(hnswPath); err == nil {
+		// Load existing index
+		s.hnsw.LoadFromFile(hnswPath)
 	}
+
+	// Initialize hybrid searcher
+	s.hybrid = hsearch.NewHybridSearcher()
+	s.hybrid.KeywordSearch = s.keywordSearch
+	s.hybrid.GetBlockContent = s.getBlockContent
+	s.hybrid.GetDocumentName = s.getDocumentName
 
 	return s, nil
+}
+
+// WithEmbedding sets up an embedding provider for semantic search
+func WithEmbedding(provider embedding.Provider) StoreOption {
+	return func(c *storeConfig) {
+		// Store provider reference in config for later use
+		// This is a placeholder - we'll set it up in NewStore
+	}
+}
+
+// SetEmbeddingProvider configures the embedding provider after store creation
+func (s *Store) SetEmbeddingProvider(provider embedding.Provider) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.embedder = provider
+
+	// Set up vector search in hybrid searcher
+	s.hybrid.VectorSearch = s.vectorSearch
+
+	// Rebuild HNSW from stored vectors
+	vectors, err := s.db.GetAllVectors()
+	if err != nil {
+		return fmt.Errorf("load vectors: %w", err)
+	}
+
+	for _, v := range vectors {
+		id := fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID)
+		s.hnsw.Add(id, v.Vector)
+	}
+
+	return nil
 }
 
 // IndexDocument indexes a document from a file path
@@ -82,67 +134,130 @@ func (s *Store) IndexDocument(path string, opts ...IndexOption) (*Document, erro
 		return nil, err
 	}
 
-	// Save to storage
-	if err := s.fs.SaveDocument(toStorageDocument(doc)); err != nil {
+	// Save to SQLite
+	if err := s.db.SaveDocument(toSQLiteDocument(doc)); err != nil {
 		return nil, fmt.Errorf("save document: %w", err)
 	}
 
-	// Add to search index
-	s.index.AddDocument(toSearchDocument(doc))
+	// Index for BM25 search
+	blocks := toSQLiteBlocks(doc)
+	if err := s.db.IndexDocument(doc.Info.ID, blocks); err != nil {
+		return nil, fmt.Errorf("index document: %w", err)
+	}
 
-	// Save updated index
-	if indexData, err := s.index.Serialize(); err == nil {
-		s.fs.SaveIndex(indexData)
+	// Generate embeddings if provider configured
+	if s.embedder != nil {
+		if err := s.embedDocument(doc); err != nil {
+			// Log but don't fail - document is already saved
+			fmt.Printf("warning: embedding failed: %v\n", err)
+		}
 	}
 
 	return doc, nil
 }
 
+// embedDocument generates and stores embeddings for a document
+func (s *Store) embedDocument(doc *Document) error {
+	ctx := context.Background()
+
+	// Collect text blocks
+	var texts []string
+	var blockIDs []string
+
+	for _, block := range doc.Content.Blocks {
+		if block.Type == BlockTypeText || block.Type == BlockTypeHeading {
+			if len(block.Content) > 0 {
+				texts = append(texts, block.Content)
+				blockIDs = append(blockIDs, block.ID)
+			}
+		}
+	}
+
+	if len(texts) == 0 {
+		return nil
+	}
+
+	// Generate embeddings in batches
+	batchSize := s.embedder.MaxBatchSize()
+	var vectors []sqlite.VectorItem
+
+	for i := 0; i < len(texts); i += batchSize {
+		end := i + batchSize
+		if end > len(texts) {
+			end = len(texts)
+		}
+
+		embeddings, err := s.embedder.Embed(ctx, texts[i:end])
+		if err != nil {
+			return fmt.Errorf("embed batch: %w", err)
+		}
+
+		for j, emb := range embeddings {
+			vectors = append(vectors, sqlite.VectorItem{
+				BlockID:    blockIDs[i+j],
+				DocumentID: doc.Info.ID,
+				Vector:     emb,
+				Text:       texts[i+j],
+				Model:      s.embedder.Name(),
+			})
+		}
+	}
+
+	// Save vectors to SQLite
+	if err := s.db.SaveVectors(doc.Info.ID, vectors); err != nil {
+		return fmt.Errorf("save vectors: %w", err)
+	}
+
+	// Add to HNSW index
+	for _, v := range vectors {
+		id := fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID)
+		s.hnsw.Add(id, v.Vector)
+	}
+
+	// Persist HNSW index
+	hnswPath := filepath.Join(s.config.BasePath, "hnsw.idx")
+	if err := s.hnsw.SaveToFile(hnswPath); err != nil {
+		return fmt.Errorf("save HNSW index: %w", err)
+	}
+
+	return nil
+}
+
 // indexPDF indexes a PDF file
 func (s *Store) indexPDF(path string, config *indexConfig) (*Document, error) {
-	// Open PDF
 	pdfDoc, err := pdf.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open PDF: %w", err)
 	}
 	defer pdfDoc.Close()
 
-	// Check if encrypted
 	if pdfDoc.IsEncrypted() {
 		return nil, ErrEncryptedPDF
 	}
 
-	// Generate document ID
 	docID := generateID()
 
-	// Get file info
 	fileInfo, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat file: %w", err)
 	}
 
-	// Compute checksum
 	var checksum string
 	if s.config.ComputeChecksum {
 		checksum, _ = computeChecksum(path)
 	}
 
-	// Get page count
 	pageCount, err := pdfDoc.PageCount()
 	if err != nil {
 		pageCount = 0
 	}
 
-	// Create semantic extractor
 	extractor := pdf.NewSemanticExtractor(pdfDoc)
-
-	// Extract content
 	pdfContent, err := extractor.ExtractContent()
 	if err != nil {
 		return nil, fmt.Errorf("extract content: %w", err)
 	}
 
-	// Convert pdf.DocumentContent to docuindex.DocumentContent
 	content := convertPDFContent(pdfContent)
 
 	// Extract and save images if enabled
@@ -154,23 +269,24 @@ func (s *Store) indexPDF(path string, config *indexConfig) (*Document, error) {
 				continue
 			}
 
-			for i, img := range images {
-				imageID := fmt.Sprintf("img_%03d_%03d", pageNum, i+1)
-				s.fs.SaveImage(docID, imageID, img.Data, img.Format)
+			for _, img := range images {
+				imageID, err := s.db.SaveImage(docID, img.Data, img.Format, 0, 0, pageNum, img.Name, "")
+				if err != nil {
+					continue
+				}
 
 				// Update content block references to images
 				for j := range content.Blocks {
 					if content.Blocks[j].Type == BlockTypeImage &&
 						content.Blocks[j].Content == img.Name &&
 						content.Blocks[j].Page == pageNum {
-						content.Blocks[j].Content = fmt.Sprintf("images/%s%s", imageID, img.FileExtension())
+						content.Blocks[j].Content = fmt.Sprintf("images/%s", imageID)
 					}
 				}
 			}
 		}
 	}
 
-	// Build document
 	name := filepath.Base(path)
 	if config.Name != "" {
 		name = config.Name
@@ -196,47 +312,39 @@ func (s *Store) indexPDF(path string, config *indexConfig) (*Document, error) {
 
 // indexDOCX indexes a DOCX file
 func (s *Store) indexDOCX(path string, config *indexConfig) (*Document, error) {
-	// Open DOCX
 	docxDoc, err := docx.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open DOCX: %w", err)
 	}
 	defer docxDoc.Close()
 
-	// Generate document ID
 	docID := generateID()
 
-	// Get file info
 	fileInfo, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat file: %w", err)
 	}
 
-	// Compute checksum
 	var checksum string
 	if s.config.ComputeChecksum {
 		checksum, _ = computeChecksum(path)
 	}
 
-	// Get page count from metadata
 	pageCount, _ := docxDoc.PageCount()
 	if pageCount == 0 {
-		pageCount = 1 // Default to 1 page
+		pageCount = 1
 	}
 
-	// Create semantic extractor
 	extractor, err := docx.NewSemanticExtractor(docxDoc)
 	if err != nil {
 		return nil, fmt.Errorf("create extractor: %w", err)
 	}
 
-	// Extract content
 	docxContent, err := extractor.ExtractContent()
 	if err != nil {
 		return nil, fmt.Errorf("extract content: %w", err)
 	}
 
-	// Convert docx.DocumentContent to docuindex.DocumentContent
 	content := convertDOCXContent(docxContent)
 
 	// Extract and save images if enabled
@@ -245,15 +353,17 @@ func (s *Store) indexDOCX(path string, config *indexConfig) (*Document, error) {
 		if err == nil {
 			images, err := imageExtractor.ExtractAllImages()
 			if err == nil {
-				for i, img := range images {
-					imageID := fmt.Sprintf("img_%03d", i+1)
-					s.fs.SaveImage(docID, imageID, img.Data, img.Format)
+				for _, img := range images {
+					imageID, err := s.db.SaveImage(docID, img.Data, img.Format, 0, 0, 0, img.Name, "")
+					if err != nil {
+						continue
+					}
 
-					// Update content block references to images
+					// Update content block references
 					for j := range content.Blocks {
 						if content.Blocks[j].Type == BlockTypeImage &&
 							content.Blocks[j].Content == img.Name {
-							content.Blocks[j].Content = fmt.Sprintf("images/%s.%s", imageID, img.Format)
+							content.Blocks[j].Content = fmt.Sprintf("images/%s", imageID)
 						}
 					}
 				}
@@ -261,7 +371,6 @@ func (s *Store) indexDOCX(path string, config *indexConfig) (*Document, error) {
 		}
 	}
 
-	// Build document
 	name := filepath.Base(path)
 	if config.Name != "" {
 		name = config.Name
@@ -278,6 +387,99 @@ func (s *Store) indexDOCX(path string, config *indexConfig) (*Document, error) {
 			Checksum:     checksum,
 			CreatedAt:    time.Now(),
 			UpdatedAt:    time.Now(),
+		},
+		Content: content,
+	}
+
+	return doc, nil
+}
+
+// IndexReader indexes a document from an io.Reader
+func (s *Store) IndexReader(r io.Reader, name string, opts ...IndexOption) (*Document, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	config := defaultIndexConfig()
+	config.Name = name
+
+	for _, opt := range opts {
+		opt(config)
+	}
+
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("read data: %w", err)
+	}
+
+	ext := strings.ToLower(filepath.Ext(name))
+	var doc *Document
+
+	switch ext {
+	case ".pdf":
+		doc, err = s.indexPDFFromBytes(data, name, config)
+	case ".docx":
+		doc, err = s.indexDOCXFromBytes(data, name, config)
+	default:
+		return nil, fmt.Errorf("unsupported file format: %s", ext)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Save to SQLite
+	if err := s.db.SaveDocument(toSQLiteDocument(doc)); err != nil {
+		return nil, fmt.Errorf("save document: %w", err)
+	}
+
+	// Index for BM25 search
+	blocks := toSQLiteBlocks(doc)
+	if err := s.db.IndexDocument(doc.Info.ID, blocks); err != nil {
+		return nil, fmt.Errorf("index document: %w", err)
+	}
+
+	// Generate embeddings if provider configured
+	if s.embedder != nil {
+		if err := s.embedDocument(doc); err != nil {
+			fmt.Printf("warning: embedding failed: %v\n", err)
+		}
+	}
+
+	return doc, nil
+}
+
+// indexPDFFromBytes indexes a PDF from bytes
+func (s *Store) indexPDFFromBytes(data []byte, name string, config *indexConfig) (*Document, error) {
+	pdfDoc, err := pdf.OpenBytes(data)
+	if err != nil {
+		return nil, fmt.Errorf("open PDF: %w", err)
+	}
+	defer pdfDoc.Close()
+
+	if pdfDoc.IsEncrypted() {
+		return nil, ErrEncryptedPDF
+	}
+
+	docID := generateID()
+	pageCount, _ := pdfDoc.PageCount()
+
+	extractor := pdf.NewSemanticExtractor(pdfDoc)
+	pdfContent, err := extractor.ExtractContent()
+	if err != nil {
+		return nil, fmt.Errorf("extract content: %w", err)
+	}
+
+	content := convertPDFContent(pdfContent)
+
+	doc := &Document{
+		Info: DocumentInfo{
+			ID:        docID,
+			Name:      name,
+			SizeBytes: int64(len(data)),
+			PageCount: pageCount,
+			Format:    FormatPDF,
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
 		},
 		Content: content,
 	}
@@ -328,108 +530,16 @@ func (s *Store) indexDOCXFromBytes(data []byte, name string, config *indexConfig
 	return doc, nil
 }
 
-// IndexReader indexes a document from an io.Reader
-func (s *Store) IndexReader(r io.Reader, name string, opts ...IndexOption) (*Document, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	config := defaultIndexConfig()
-	config.Name = name
-
-	for _, opt := range opts {
-		opt(config)
-	}
-
-	// Read all data
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return nil, fmt.Errorf("read data: %w", err)
-	}
-
-	// Detect format from name
-	ext := strings.ToLower(filepath.Ext(name))
-
-	var doc *Document
-
-	switch ext {
-	case ".pdf":
-		doc, err = s.indexPDFFromBytes(data, name, config)
-	case ".docx":
-		doc, err = s.indexDOCXFromBytes(data, name, config)
-	default:
-		return nil, fmt.Errorf("unsupported file format: %s", ext)
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	// Save to storage
-	if err := s.fs.SaveDocument(toStorageDocument(doc)); err != nil {
-		return nil, fmt.Errorf("save document: %w", err)
-	}
-
-	// Add to search index
-	s.index.AddDocument(toSearchDocument(doc))
-
-	// Save updated index
-	if indexData, err := s.index.Serialize(); err == nil {
-		s.fs.SaveIndex(indexData)
-	}
-
-	return doc, nil
-}
-
-// indexPDFFromBytes indexes a PDF from bytes
-func (s *Store) indexPDFFromBytes(data []byte, name string, config *indexConfig) (*Document, error) {
-	pdfDoc, err := pdf.OpenBytes(data)
-	if err != nil {
-		return nil, fmt.Errorf("open PDF: %w", err)
-	}
-	defer pdfDoc.Close()
-
-	if pdfDoc.IsEncrypted() {
-		return nil, ErrEncryptedPDF
-	}
-
-	docID := generateID()
-
-	pageCount, _ := pdfDoc.PageCount()
-
-	extractor := pdf.NewSemanticExtractor(pdfDoc)
-	pdfContent, err := extractor.ExtractContent()
-	if err != nil {
-		return nil, fmt.Errorf("extract content: %w", err)
-	}
-
-	content := convertPDFContent(pdfContent)
-
-	doc := &Document{
-		Info: DocumentInfo{
-			ID:        docID,
-			Name:      name,
-			SizeBytes: int64(len(data)),
-			PageCount: pageCount,
-			Format:    FormatPDF,
-			CreatedAt: time.Now(),
-			UpdatedAt: time.Now(),
-		},
-		Content: content,
-	}
-
-	return doc, nil
-}
-
 // GetDocument retrieves a document by ID
 func (s *Store) GetDocument(id string) (*Document, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	storageDoc, err := s.fs.GetDocument(id)
+	sqliteDoc, err := s.db.GetDocument(id)
 	if err != nil {
 		return nil, err
 	}
-	return fromStorageDocument(storageDoc), nil
+	return fromSQLiteDocument(sqliteDoc), nil
 }
 
 // DeleteDocument removes a document from the store
@@ -437,17 +547,24 @@ func (s *Store) DeleteDocument(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Remove from index
-	s.index.RemoveDocument(id)
+	// Delete from HNSW index
+	if s.hnsw != nil {
+		vectors, _ := s.db.GetVectorsForDocument(id)
+		for _, v := range vectors {
+			hnswID := fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID)
+			s.hnsw.Delete(hnswID)
+		}
+	}
 
-	// Remove from storage
-	if err := s.fs.DeleteDocument(id); err != nil {
+	// Delete from SQLite (cascades to blocks, vectors, images)
+	if err := s.db.DeleteDocument(id); err != nil {
 		return err
 	}
 
-	// Save updated index
-	if indexData, err := s.index.Serialize(); err == nil {
-		s.fs.SaveIndex(indexData)
+	// Persist HNSW index
+	if s.hnsw != nil {
+		hnswPath := filepath.Join(s.config.BasePath, "hnsw.idx")
+		s.hnsw.SaveToFile(hnswPath)
 	}
 
 	return nil
@@ -458,14 +575,14 @@ func (s *Store) ListDocuments() ([]*DocumentInfo, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	infos, err := s.fs.ListDocuments()
+	infos, err := s.db.ListDocuments()
 	if err != nil {
 		return nil, err
 	}
-	return fromStorageDocumentInfos(infos), nil
+	return fromSQLiteDocumentInfos(infos), nil
 }
 
-// Search performs a full-text search across all documents
+// Search performs a search across all documents
 func (s *Store) Search(query string, opts ...SearchOption) (*SearchResults, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -481,47 +598,44 @@ func (s *Store) Search(query string, opts ...SearchOption) (*SearchResults, erro
 		return nil, ErrInvalidQuery
 	}
 
-	// Search the index
-	searchResults := s.index.Search(query, config.MaxResults)
-
-	// Filter by minimum score
-	if config.MinScore > 0 {
-		searchResults = search.FilterByScore(searchResults, config.MinScore)
+	// Use hybrid searcher
+	hybridOpts := &hsearch.HybridSearchOptions{
+		Mode:          hsearch.SearchMode(config.SearchMode),
+		MaxResults:    config.MaxResults,
+		MinScore:      config.MinScore,
+		VectorWeight:  config.VectorWeight,
+		KeywordWeight: config.KeywordWeight,
+		Timeout:       30 * time.Second,
 	}
 
-	// Convert to our type and enrich results with content and context
-	results := make([]SearchResult, len(searchResults))
-	for i := range searchResults {
+	ctx := context.Background()
+	hybridResults, err := s.hybrid.Search(ctx, query, hybridOpts)
+	if err != nil {
+		return nil, fmt.Errorf("hybrid search: %w", err)
+	}
+
+	// Convert to SearchResults
+	results := make([]SearchResult, len(hybridResults.Results))
+	for i, r := range hybridResults.Results {
 		results[i] = SearchResult{
-			DocumentID:   searchResults[i].DocumentID,
-			DocumentName: searchResults[i].DocumentName,
-			BlockID:      searchResults[i].BlockID,
-			Score:        searchResults[i].Score,
-			Positions:    searchResults[i].Positions,
+			DocumentID:   r.DocumentID,
+			DocumentName: r.DocumentName,
+			BlockID:      r.BlockID,
+			Content:      r.Content,
+			Score:        r.FusedScore,
+			Page:         r.Page,
+			Section:      r.Section,
 		}
 
-		storageDoc, err := s.fs.GetDocument(searchResults[i].DocumentID)
-		if err != nil {
-			continue
-		}
-		doc := fromStorageDocument(storageDoc)
+		// Build snippet
+		results[i].Snippet = buildSnippet(r.Content, query, config.HighlightPre, config.HighlightPost)
 
-		block := doc.GetBlockByID(searchResults[i].BlockID)
-		if block != nil {
-			results[i].Content = block.Content
-			results[i].Page = block.Page
-			results[i].Section = block.Semantic.Section
-
-			// Build snippet
-			results[i].Snippet = buildSnippet(block.Content, query, config.HighlightPre, config.HighlightPost)
-
-			// Get context if requested
-			if config.ContextWindow > 0 {
-				ctx, err := s.getContextLocked(searchResults[i].DocumentID, searchResults[i].BlockID, config.ContextWindow)
-				if err == nil {
-					results[i].Context = append(ctx.Before, ctx.Center)
-					results[i].Context = append(results[i].Context, ctx.After...)
-				}
+		// Get context if requested
+		if config.ContextWindow > 0 {
+			ctx, err := s.getContextLocked(r.DocumentID, r.BlockID, config.ContextWindow)
+			if err == nil {
+				results[i].Context = append(ctx.Before, ctx.Center)
+				results[i].Context = append(results[i].Context, ctx.After...)
 			}
 		}
 	}
@@ -532,6 +646,88 @@ func (s *Store) Search(query string, opts ...SearchOption) (*SearchResults, erro
 		Results:    results,
 		SearchTime: time.Since(startTime),
 	}, nil
+}
+
+// keywordSearch performs BM25 search (used by hybrid searcher)
+func (s *Store) keywordSearch(query string, limit int) ([]hsearch.SearchResult, error) {
+	searchOpts := &sqlite.SearchOptions{
+		MaxResults: limit,
+	}
+	results, err := s.db.Search(query, searchOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]hsearch.SearchResult, len(results.Results))
+	for i, r := range results.Results {
+		out[i] = hsearch.SearchResult{
+			DocumentID:   r.DocumentID,
+			DocumentName: r.DocumentName,
+			BlockID:      r.BlockID,
+			Content:      r.Content,
+			Snippet:      r.Snippet,
+			Score:        r.Score,
+			Page:         r.Page,
+			Section:      r.Section,
+		}
+	}
+	return out, nil
+}
+
+// vectorSearch performs semantic vector search (used by hybrid searcher)
+func (s *Store) vectorSearch(ctx context.Context, query string, limit int) ([]hsearch.VectorSearchResult, error) {
+	if s.embedder == nil || s.hnsw == nil {
+		return nil, nil
+	}
+
+	// Embed query
+	queryVector, err := s.embedder.EmbedSingle(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("embed query: %w", err)
+	}
+
+	// Search HNSW
+	hnswResults, err := s.hnsw.Search(queryVector, limit)
+	if err != nil {
+		return nil, fmt.Errorf("HNSW search: %w", err)
+	}
+
+	// Convert results
+	out := make([]hsearch.VectorSearchResult, 0, len(hnswResults))
+	for _, r := range hnswResults {
+		// Parse document:block ID
+		parts := strings.SplitN(r.ID, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		out = append(out, hsearch.VectorSearchResult{
+			DocumentID: parts[0],
+			BlockID:    parts[1],
+			Score:      r.Score,
+			Distance:   r.Distance,
+		})
+	}
+
+	return out, nil
+}
+
+// getBlockContent retrieves content for a block (used by hybrid searcher)
+func (s *Store) getBlockContent(docID, blockID string) (content, snippet string, page int, section string, err error) {
+	block, err := s.db.GetBlockByID(docID, blockID)
+	if err != nil {
+		return "", "", 0, "", err
+	}
+	return block.Content, "", block.Page, block.Section, nil
+}
+
+// getDocumentName retrieves document name (used by hybrid searcher)
+func (s *Store) getDocumentName(docID string) string {
+	doc, err := s.db.GetDocument(docID)
+	if err != nil {
+		return ""
+	}
+	return doc.Info.Name
 }
 
 // SearchInDocument searches within a specific document
@@ -550,44 +746,29 @@ func (s *Store) GetContext(docID, blockID string, windowSize int) (*ContextResul
 
 // getContextLocked gets context (caller must hold read lock)
 func (s *Store) getContextLocked(docID, blockID string, windowSize int) (*ContextResult, error) {
-	storageDoc, err := s.fs.GetDocument(docID)
+	before, center, after, err := s.db.GetContextBlocks(docID, blockID, windowSize)
 	if err != nil {
 		return nil, err
 	}
-	doc := fromStorageDocument(storageDoc)
 
-	var centerIdx int = -1
-	for i, b := range doc.Content.Blocks {
-		if b.ID == blockID {
-			centerIdx = i
-			break
-		}
-	}
-
-	if centerIdx < 0 {
-		return nil, ErrInvalidInput
+	var centerBlock ContentBlock
+	if len(center) > 0 {
+		centerBlock = fromSQLiteBlock(&center[0])
 	}
 
 	result := &ContextResult{
 		DocumentID: docID,
 		CenterID:   blockID,
-		Center:     doc.Content.Blocks[centerIdx],
+		Center:     centerBlock,
+		Before:     make([]ContentBlock, len(before)),
+		After:      make([]ContentBlock, len(after)),
 	}
 
-	start := centerIdx - windowSize
-	if start < 0 {
-		start = 0
+	for i := range before {
+		result.Before[i] = fromSQLiteBlock(&before[i])
 	}
-	for i := start; i < centerIdx; i++ {
-		result.Before = append(result.Before, doc.Content.Blocks[i])
-	}
-
-	end := centerIdx + windowSize + 1
-	if end > len(doc.Content.Blocks) {
-		end = len(doc.Content.Blocks)
-	}
-	for i := centerIdx + 1; i < end; i++ {
-		result.After = append(result.After, doc.Content.Blocks[i])
+	for i := range after {
+		result.After[i] = fromSQLiteBlock(&after[i])
 	}
 
 	return result, nil
@@ -598,12 +779,13 @@ func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Save index before closing
-	if indexData, err := s.index.Serialize(); err == nil {
-		s.fs.SaveIndex(indexData)
+	// Save HNSW index
+	if s.hnsw != nil {
+		hnswPath := filepath.Join(s.config.BasePath, "hnsw.idx")
+		s.hnsw.SaveToFile(hnswPath)
 	}
 
-	return s.fs.Close()
+	return s.db.Close()
 }
 
 // Stats returns statistics about the store
@@ -611,29 +793,18 @@ func (s *Store) Stats() StoreStats {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	docs, _ := s.fs.ListDocuments()
-	indexStats := s.index.Stats()
-
-	var totalBlocks, totalImages int
-	for _, docInfo := range docs {
-		storageDoc, err := s.fs.GetDocument(docInfo.ID)
-		if err != nil {
-			continue
-		}
-		doc := fromStorageDocument(storageDoc)
-		totalBlocks += len(doc.Content.Blocks)
-		for _, block := range doc.Content.Blocks {
-			if block.Type == BlockTypeImage {
-				totalImages++
-			}
-		}
-	}
+	docCount, _ := s.db.GetDocumentCount()
+	blockCount, _ := s.db.GetBlockCount()
+	imageCount, _ := s.db.GetImageCount()
+	termCount, _ := s.db.GetIndexTermCount()
+	vectorCount, _ := s.db.GetVectorCount()
 
 	return StoreStats{
-		DocumentCount: len(docs),
-		TotalBlocks:   totalBlocks,
-		TotalImages:   totalImages,
-		IndexTerms:    indexStats.TermCount,
+		DocumentCount: docCount,
+		TotalBlocks:   blockCount,
+		TotalImages:   imageCount,
+		IndexTerms:    termCount,
+		VectorCount:   vectorCount,
 	}
 }
 
@@ -643,13 +814,13 @@ type StoreStats struct {
 	TotalBlocks   int   `json:"total_blocks"`
 	TotalImages   int   `json:"total_images"`
 	IndexTerms    int   `json:"index_terms"`
+	VectorCount   int   `json:"vector_count"`
 	StorageBytes  int64 `json:"storage_bytes"`
 }
 
 // Helper functions
 
 func generateID() string {
-	// Simple UUID-like ID
 	now := time.Now().UnixNano()
 	h := sha256.Sum256([]byte(fmt.Sprintf("%d", now)))
 	return fmt.Sprintf("%x", h[:16])
@@ -671,20 +842,17 @@ func computeChecksum(path string) (string, error) {
 }
 
 func buildSnippet(content, query, highlightPre, highlightPost string) string {
-	// Simple snippet building - get context around first match
 	queryLower := strings.ToLower(query)
 	contentLower := strings.ToLower(content)
 
 	idx := strings.Index(contentLower, queryLower)
 	if idx < 0 {
-		// No exact match, just return beginning
 		if len(content) > 200 {
 			return content[:200] + "..."
 		}
 		return content
 	}
 
-	// Get context around match
 	start := idx - 50
 	if start < 0 {
 		start = 0
@@ -696,7 +864,6 @@ func buildSnippet(content, query, highlightPre, highlightPost string) string {
 
 	snippet := content[start:end]
 
-	// Add ellipsis
 	if start > 0 {
 		snippet = "..." + snippet
 	}
@@ -704,9 +871,7 @@ func buildSnippet(content, query, highlightPre, highlightPost string) string {
 		snippet = snippet + "..."
 	}
 
-	// Highlight matches (simple approach)
 	if highlightPre != "" && highlightPost != "" {
-		// Case-insensitive replace
 		for i := 0; i <= len(snippet)-len(query); i++ {
 			if strings.EqualFold(snippet[i:i+len(query)], query) {
 				snippet = snippet[:i] + highlightPre + snippet[i:i+len(query)] + highlightPost + snippet[i+len(query):]
@@ -806,207 +971,165 @@ func convertDOCXContent(docxContent *docx.DocumentContent) DocumentContent {
 	return content
 }
 
-// toStorageDocument converts docuindex.Document to storage.Document
-func toStorageDocument(doc *Document) *storage.Document {
-	storageDoc := &storage.Document{
-		Info: storage.DocumentInfo{
+// toSQLiteDocument converts docuindex.Document to sqlite.Document
+func toSQLiteDocument(doc *Document) *sqlite.Document {
+	sqliteDoc := &sqlite.Document{
+		Info: sqlite.DocumentInfo{
 			ID:           doc.Info.ID,
 			Name:         doc.Info.Name,
 			OriginalPath: doc.Info.OriginalPath,
 			SizeBytes:    doc.Info.SizeBytes,
 			PageCount:    doc.Info.PageCount,
-			Format:       storage.DocumentFormat(doc.Info.Format),
+			Format:       string(doc.Info.Format),
 			Checksum:     doc.Info.Checksum,
 			CreatedAt:    doc.Info.CreatedAt,
 			UpdatedAt:    doc.Info.UpdatedAt,
 		},
-		Content: storage.DocumentContent{
-			Version: doc.Content.Version,
-			Blocks:  make([]storage.ContentBlock, len(doc.Content.Blocks)),
-		},
+		Blocks: make([]sqlite.ContentBlock, len(doc.Content.Blocks)),
 	}
 
 	for i, block := range doc.Content.Blocks {
-		storageDoc.Content.Blocks[i] = storage.ContentBlock{
-			ID:      block.ID,
-			Type:    storage.BlockType(block.Type),
-			Content: block.Content,
-			Page:    block.Page,
-			BBox: storage.BoundingBox{
-				X:          block.BBox.X,
-				Y:          block.BBox.Y,
-				Width:      block.BBox.Width,
-				Height:     block.BBox.Height,
-				PageWidth:  block.BBox.PageWidth,
-				PageHeight: block.BBox.PageHeight,
-			},
-			Semantic: storage.SemanticInfo{
-				IsHeading:    block.Semantic.IsHeading,
-				HeadingLevel: block.Semantic.HeadingLevel,
-				Section:      block.Semantic.Section,
-				Keywords:     block.Semantic.Keywords,
-				Context:      block.Semantic.Context,
-			},
-			Children: block.Children,
+		sqliteDoc.Blocks[i] = sqlite.ContentBlock{
+			ID:           block.ID,
+			Type:         string(block.Type),
+			Content:      block.Content,
+			Page:         block.Page,
+			Sequence:     i,
+			BBoxX:        block.BBox.X,
+			BBoxY:        block.BBox.Y,
+			BBoxWidth:    block.BBox.Width,
+			BBoxHeight:   block.BBox.Height,
+			PageWidth:    block.BBox.PageWidth,
+			PageHeight:   block.BBox.PageHeight,
+			IsHeading:    block.Semantic.IsHeading,
+			HeadingLevel: block.Semantic.HeadingLevel,
+			Section:      block.Semantic.Section,
+			Keywords:     block.Semantic.Keywords,
+			Context:      block.Semantic.Context,
+			Children:     block.Children,
 		}
 		if block.Font != nil {
-			storageDoc.Content.Blocks[i].Font = &storage.FontInfo{
-				Name:   block.Font.Name,
-				Size:   block.Font.Size,
-				Bold:   block.Font.Bold,
-				Italic: block.Font.Italic,
-			}
+			sqliteDoc.Blocks[i].FontName = block.Font.Name
+			sqliteDoc.Blocks[i].FontSize = block.Font.Size
+			sqliteDoc.Blocks[i].FontBold = block.Font.Bold
+			sqliteDoc.Blocks[i].FontItalic = block.Font.Italic
 		}
 	}
 
-	return storageDoc
+	return sqliteDoc
 }
 
-// fromStorageDocument converts storage.Document to docuindex.Document
-func fromStorageDocument(storageDoc *storage.Document) *Document {
+// toSQLiteBlocks converts document blocks to sqlite.ContentBlock slice
+func toSQLiteBlocks(doc *Document) []sqlite.ContentBlock {
+	blocks := make([]sqlite.ContentBlock, len(doc.Content.Blocks))
+	for i, block := range doc.Content.Blocks {
+		blocks[i] = sqlite.ContentBlock{
+			ID:           block.ID,
+			Type:         string(block.Type),
+			Content:      block.Content,
+			Page:         block.Page,
+			Sequence:     i,
+			BBoxX:        block.BBox.X,
+			BBoxY:        block.BBox.Y,
+			BBoxWidth:    block.BBox.Width,
+			BBoxHeight:   block.BBox.Height,
+			PageWidth:    block.BBox.PageWidth,
+			PageHeight:   block.BBox.PageHeight,
+			IsHeading:    block.Semantic.IsHeading,
+			HeadingLevel: block.Semantic.HeadingLevel,
+			Section:      block.Semantic.Section,
+			Keywords:     block.Semantic.Keywords,
+			Context:      block.Semantic.Context,
+			Children:     block.Children,
+		}
+		if block.Font != nil {
+			blocks[i].FontName = block.Font.Name
+			blocks[i].FontSize = block.Font.Size
+			blocks[i].FontBold = block.Font.Bold
+			blocks[i].FontItalic = block.Font.Italic
+		}
+	}
+	return blocks
+}
+
+// fromSQLiteDocument converts sqlite.Document to docuindex.Document
+func fromSQLiteDocument(sqliteDoc *sqlite.Document) *Document {
 	doc := &Document{
 		Info: DocumentInfo{
-			ID:           storageDoc.Info.ID,
-			Name:         storageDoc.Info.Name,
-			OriginalPath: storageDoc.Info.OriginalPath,
-			SizeBytes:    storageDoc.Info.SizeBytes,
-			PageCount:    storageDoc.Info.PageCount,
-			Format:       DocumentFormat(storageDoc.Info.Format),
-			Checksum:     storageDoc.Info.Checksum,
-			CreatedAt:    storageDoc.Info.CreatedAt,
-			UpdatedAt:    storageDoc.Info.UpdatedAt,
+			ID:           sqliteDoc.Info.ID,
+			Name:         sqliteDoc.Info.Name,
+			OriginalPath: sqliteDoc.Info.OriginalPath,
+			SizeBytes:    sqliteDoc.Info.SizeBytes,
+			PageCount:    sqliteDoc.Info.PageCount,
+			Format:       DocumentFormat(sqliteDoc.Info.Format),
+			Checksum:     sqliteDoc.Info.Checksum,
+			CreatedAt:    sqliteDoc.Info.CreatedAt,
+			UpdatedAt:    sqliteDoc.Info.UpdatedAt,
 		},
 		Content: DocumentContent{
-			Version: storageDoc.Content.Version,
-			Blocks:  make([]ContentBlock, len(storageDoc.Content.Blocks)),
+			Version: "1.0",
+			Blocks:  make([]ContentBlock, len(sqliteDoc.Blocks)),
 		},
 	}
 
-	for i, block := range storageDoc.Content.Blocks {
-		doc.Content.Blocks[i] = ContentBlock{
-			ID:      block.ID,
-			Type:    BlockType(block.Type),
-			Content: block.Content,
-			Page:    block.Page,
-			BBox: BoundingBox{
-				X:          block.BBox.X,
-				Y:          block.BBox.Y,
-				Width:      block.BBox.Width,
-				Height:     block.BBox.Height,
-				PageWidth:  block.BBox.PageWidth,
-				PageHeight: block.BBox.PageHeight,
-			},
-			Semantic: SemanticInfo{
-				IsHeading:    block.Semantic.IsHeading,
-				HeadingLevel: block.Semantic.HeadingLevel,
-				Section:      block.Semantic.Section,
-				Keywords:     block.Semantic.Keywords,
-				Context:      block.Semantic.Context,
-			},
-			Children: block.Children,
-		}
-		if block.Font != nil {
-			doc.Content.Blocks[i].Font = &FontInfo{
-				Name:   block.Font.Name,
-				Size:   block.Font.Size,
-				Bold:   block.Font.Bold,
-				Italic: block.Font.Italic,
-			}
-		}
+	for i := range sqliteDoc.Blocks {
+		doc.Content.Blocks[i] = fromSQLiteBlock(&sqliteDoc.Blocks[i])
 	}
 
 	return doc
 }
 
-// toSearchDocument converts docuindex.Document to search.Document
-func toSearchDocument(doc *Document) *search.Document {
-	searchDoc := &search.Document{
-		Info: search.DocumentInfo{
-			ID:           doc.Info.ID,
-			Name:         doc.Info.Name,
-			OriginalPath: doc.Info.OriginalPath,
-			SizeBytes:    doc.Info.SizeBytes,
-			PageCount:    doc.Info.PageCount,
-			Format:       search.DocumentFormat(doc.Info.Format),
-			Checksum:     doc.Info.Checksum,
-			CreatedAt:    doc.Info.CreatedAt,
-			UpdatedAt:    doc.Info.UpdatedAt,
+// fromSQLiteBlock converts sqlite.ContentBlock to docuindex.ContentBlock
+func fromSQLiteBlock(block *sqlite.ContentBlock) ContentBlock {
+	cb := ContentBlock{
+		ID:      block.ID,
+		Type:    BlockType(block.Type),
+		Content: block.Content,
+		Page:    block.Page,
+		BBox: BoundingBox{
+			X:          block.BBoxX,
+			Y:          block.BBoxY,
+			Width:      block.BBoxWidth,
+			Height:     block.BBoxHeight,
+			PageWidth:  block.PageWidth,
+			PageHeight: block.PageHeight,
 		},
-		Content: search.DocumentContent{
-			Version: doc.Content.Version,
-			Blocks:  make([]search.ContentBlock, len(doc.Content.Blocks)),
+		Semantic: SemanticInfo{
+			IsHeading:    block.IsHeading,
+			HeadingLevel: block.HeadingLevel,
+			Section:      block.Section,
+			Keywords:     block.Keywords,
+			Context:      block.Context,
 		},
+		Children: block.Children,
 	}
 
-	for i, block := range doc.Content.Blocks {
-		searchDoc.Content.Blocks[i] = search.ContentBlock{
-			ID:      block.ID,
-			Type:    search.BlockType(block.Type),
-			Content: block.Content,
-			Page:    block.Page,
-			BBox: search.BoundingBox{
-				X:          block.BBox.X,
-				Y:          block.BBox.Y,
-				Width:      block.BBox.Width,
-				Height:     block.BBox.Height,
-				PageWidth:  block.BBox.PageWidth,
-				PageHeight: block.BBox.PageHeight,
-			},
-			Semantic: search.SemanticInfo{
-				IsHeading:    block.Semantic.IsHeading,
-				HeadingLevel: block.Semantic.HeadingLevel,
-				Section:      block.Semantic.Section,
-				Keywords:     block.Semantic.Keywords,
-				Context:      block.Semantic.Context,
-			},
-			Children: block.Children,
-		}
-		if block.Font != nil {
-			searchDoc.Content.Blocks[i].Font = &search.FontInfo{
-				Name:   block.Font.Name,
-				Size:   block.Font.Size,
-				Bold:   block.Font.Bold,
-				Italic: block.Font.Italic,
-			}
+	if block.FontName != "" {
+		cb.Font = &FontInfo{
+			Name:   block.FontName,
+			Size:   block.FontSize,
+			Bold:   block.FontBold,
+			Italic: block.FontItalic,
 		}
 	}
 
-	return searchDoc
+	return cb
 }
 
-// fromSearchResults converts []search.SearchResult to []SearchResult
-func fromSearchResults(results []search.SearchResult) []SearchResult {
-	out := make([]SearchResult, len(results))
-	for i, r := range results {
-		out[i] = SearchResult{
-			DocumentID:   r.DocumentID,
-			DocumentName: r.DocumentName,
-			BlockID:      r.BlockID,
-			Content:      r.Content,
-			Snippet:      r.Snippet,
-			Score:        r.Score,
-			Page:         r.Page,
-			Section:      r.Section,
-			Positions:    r.Positions,
-		}
-	}
-	return out
-}
-
-// fromStorageDocumentInfos converts []*storage.DocumentInfo to []*DocumentInfo
-func fromStorageDocumentInfos(infos []*storage.DocumentInfo) []*DocumentInfo {
+// fromSQLiteDocumentInfos converts []sqlite.DocumentInfo to []*DocumentInfo
+func fromSQLiteDocumentInfos(infos []sqlite.DocumentInfo) []*DocumentInfo {
 	out := make([]*DocumentInfo, len(infos))
-	for i, info := range infos {
+	for i := range infos {
 		out[i] = &DocumentInfo{
-			ID:           info.ID,
-			Name:         info.Name,
-			OriginalPath: info.OriginalPath,
-			SizeBytes:    info.SizeBytes,
-			PageCount:    info.PageCount,
-			Format:       DocumentFormat(info.Format),
-			Checksum:     info.Checksum,
-			CreatedAt:    info.CreatedAt,
-			UpdatedAt:    info.UpdatedAt,
+			ID:           infos[i].ID,
+			Name:         infos[i].Name,
+			OriginalPath: infos[i].OriginalPath,
+			SizeBytes:    infos[i].SizeBytes,
+			PageCount:    infos[i].PageCount,
+			Format:       DocumentFormat(infos[i].Format),
+			Checksum:     infos[i].Checksum,
+			CreatedAt:    infos[i].CreatedAt,
+			UpdatedAt:    infos[i].UpdatedAt,
 		}
 	}
 	return out

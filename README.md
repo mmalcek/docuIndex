@@ -6,15 +6,16 @@ A pure Go package for parsing PDF and DOCX files and extracting structured conte
 
 ## Features
 
-- **Pure Go** - No CGO or external dependencies, standard library only
+- **Pure Go** - No CGO or external dependencies
 - **PDF Parsing** - Complete PDF parser with PostScript content stream interpreter
 - **DOCX Parsing** - Full DOCX support via ZIP/XML parsing with style resolution
 - **Text Extraction** - Extract text with positioning, font info, and semantic structure
 - **Image Extraction** - Extract embedded images (JPEG, PNG, GIF, BMP, TIFF)
 - **Semantic Analysis** - Automatic heading detection, section tracking, keyword extraction
-- **Full-Text Search** - BM25-based search with boolean queries, phrase matching, and context windows for RAG
+- **SQLite Storage** - Unified SQLite database for all metadata and search indices
+- **Hybrid Search** - BM25 keyword search + vector semantic search with RRF fusion
+- **Embedding Providers** - Azure OpenAI, OpenAI, and Ollama support
 - **Thread-Safe** - Safe for concurrent use
-- **Persistent Storage** - JSON-based storage with automatic indexing
 
 ## Installation
 
@@ -82,6 +83,37 @@ store, err := docuindex.NewStore("./data",
 )
 ```
 
+#### Configure Embedding Provider (Optional)
+
+```go
+import "github.com/mariomalcek/docuindex/embedding"
+
+// Azure OpenAI
+provider, err := embedding.NewProvider(embedding.Config{
+    Provider: "azure",
+    Endpoint: os.Getenv("AZURE_ENDPOINT"),
+    APIKey:   os.Getenv("AZURE_API_KEY"),
+    Model:    "text-embedding-3-small",
+})
+
+// OpenAI
+provider, err := embedding.NewProvider(embedding.Config{
+    Provider: "openai",
+    APIKey:   os.Getenv("OPENAI_API_KEY"),
+    Model:    "text-embedding-3-small",
+})
+
+// Ollama (local)
+provider, err := embedding.NewProvider(embedding.Config{
+    Provider: "ollama",
+    Endpoint: "http://localhost:11434",
+    Model:    "nomic-embed-text",
+})
+
+// Add to store for semantic search
+store.SetEmbeddingProvider(provider)
+```
+
 #### Index Documents
 
 ```go
@@ -120,7 +152,7 @@ err := store.DeleteDocument("document-id")
 
 ### Search Operations
 
-#### Basic Search
+#### Basic Search (BM25 Keyword Search)
 
 ```go
 results, err := store.Search("machine learning")
@@ -132,6 +164,27 @@ for _, r := range results.Results {
     fmt.Printf("Score: %.2f\n", r.Score)
     fmt.Printf("Snippet: %s\n", r.Snippet)
 }
+```
+
+#### Search Modes
+
+```go
+// Keyword search (BM25) - default
+results, err := store.Search("neural networks",
+    docuindex.WithSearchMode(docuindex.SearchModeKeyword),
+)
+
+// Semantic search (vector embeddings) - requires embedding provider
+results, err := store.Search("how does machine learning work",
+    docuindex.WithSearchMode(docuindex.SearchModeSemantic),
+)
+
+// Hybrid search (BM25 + vectors with RRF fusion)
+results, err := store.Search("climate change impacts",
+    docuindex.WithSearchMode(docuindex.SearchModeHybrid),
+    docuindex.WithVectorWeight(0.6),   // Weight for semantic results
+    docuindex.WithKeywordWeight(0.4),  // Weight for keyword results
+)
 ```
 
 #### Search with Options
@@ -175,17 +228,6 @@ ctx, err := store.GetContext("doc-id", "blk_042", 5)
 
 ### Document Structure
 
-Each indexed document is stored with the following structure:
-
-```
-{uuid}/
-├── document.json  # Document metadata + content blocks
-├── index.json     # Search index
-└── images/        # Extracted images (if enabled)
-    ├── img_001.png
-    └── img_001.json
-```
-
 #### Content Block
 
 ```go
@@ -226,56 +268,51 @@ fmt.Printf("Documents: %d\n", stats.DocumentCount)
 fmt.Printf("Total blocks: %d\n", stats.TotalBlocks)
 fmt.Printf("Total images: %d\n", stats.TotalImages)
 fmt.Printf("Index terms: %d\n", stats.IndexTerms)
+fmt.Printf("Vectors: %d\n", stats.VectorCount)
 ```
 
-## Storage Format
+## Storage Architecture
 
-### document.json
+DocuIndex uses a unified SQLite database for all metadata and search indices:
 
-```json
-{
-  "info": {
-    "id": "abc123...",
-    "name": "document.pdf",
-    "original_path": "/path/to/document.pdf",
-    "size_bytes": 1234567,
-    "page_count": 42,
-    "format": "pdf",
-    "checksum": "sha256:...",
-    "created_at": "2024-01-08T10:30:00Z",
-    "updated_at": "2024-01-08T10:30:00Z"
-  },
-  "content": {
-    "version": "1.0",
-    "blocks": [
-      {
-        "id": "blk_001",
-        "type": "heading",
-        "content": "Chapter 1: Introduction",
-        "page": 1,
-        "bbox": {
-          "x": 72,
-          "y": 720,
-          "width": 400,
-          "height": 24,
-          "page_width": 612,
-          "page_height": 792
-        },
-        "font": {
-          "name": "Helvetica-Bold",
-          "size": 18,
-          "bold": true
-        },
-        "semantic": {
-          "is_heading": true,
-          "heading_level": 1,
-          "keywords": ["introduction", "chapter"]
-        }
-      }
-    ]
-  }
-}
 ```
+data/
+├── docuindex.db           # SQLite database (all metadata)
+├── hnsw.idx               # HNSW vector index (binary)
+└── images/                # Extracted images with UUID names
+    ├── a1b2c3d4-e5f6-7890-abcd-ef1234567890.png
+    └── ...
+```
+
+### Database Schema
+
+The SQLite database contains:
+- **documents** - Document metadata (name, path, format, page count, timestamps)
+- **content_blocks** - Parsed content with position, font, and semantic info
+- **search_terms** - BM25 inverted index with term positions
+- **document_stats** - Statistics for BM25 ranking
+- **vectors** - Block embeddings as BLOBs
+- **images** - Image metadata (actual files in images/ folder)
+
+## Search Capabilities
+
+### BM25 Keyword Search
+- Industry-standard relevance ranking
+- Boolean queries (AND, OR, NOT)
+- Phrase matching with position data
+- Porter stemming and stop word filtering
+- Heading boost (1.5x)
+
+### Semantic Vector Search
+- HNSW approximate nearest neighbor
+- Supports Azure OpenAI, OpenAI, Ollama
+- Block-level embeddings for granular retrieval
+- Cosine similarity distance
+
+### Hybrid Search
+- Combines BM25 + vector results
+- Reciprocal Rank Fusion (RRF) scoring
+- Configurable weights
 
 ## Supported PDF Features
 
@@ -301,6 +338,12 @@ fmt.Printf("Index terms: %d\n", stats.IndexTerms)
 - Application properties (page count, word count)
 - Field instructions (TOC, page numbers, hyperlinks)
 - Position estimation for search result context
+
+## Dependencies
+
+- `modernc.org/sqlite` - Pure Go SQLite (no CGO)
+- `github.com/google/uuid` - UUID generation
+- Standard library for everything else
 
 ## Limitations
 
