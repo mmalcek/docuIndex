@@ -165,7 +165,7 @@ func (s *Store) embedDocument(doc *Document) error {
 	var blockIDs []string
 
 	for _, block := range doc.Content.Blocks {
-		if block.Type == BlockTypeText || block.Type == BlockTypeHeading {
+		if block.Type == BlockTypeText || block.Type == BlockTypeHeading || block.Type == BlockTypeCustom {
 			if len(block.Content) > 0 {
 				texts = append(texts, block.Content)
 				blockIDs = append(blockIDs, block.ID)
@@ -394,6 +394,268 @@ func (s *Store) indexDOCX(path string, config *indexConfig) (*Document, error) {
 	return doc, nil
 }
 
+// IndexCustomData indexes custom structured data
+func (s *Store) IndexCustomData(data *CustomData, opts ...IndexOption) (*Document, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	config := defaultIndexConfig()
+	for _, opt := range opts {
+		opt(config)
+	}
+
+	// Validate input
+	if data == nil {
+		return nil, NewCustomDataError("", "data is nil", ErrInvalidCustomData)
+	}
+	if data.Source == "" {
+		return nil, NewCustomDataError("", "source is required", ErrMissingSource)
+	}
+	if data.Name == "" {
+		return nil, NewCustomDataError(data.Source, "name is required", ErrInvalidCustomData)
+	}
+	if len(data.Entries) == 0 {
+		return nil, NewCustomDataError(data.Source, "at least one entry is required", ErrMissingEntries)
+	}
+
+	docID := generateID()
+	now := time.Now()
+
+	// Use provided import time or default to now
+	importedAt := data.ImportedAt
+	if importedAt.IsZero() {
+		importedAt = now
+	}
+
+	// Convert entries to content blocks
+	blocks := make([]ContentBlock, len(data.Entries))
+	var totalSize int
+
+	for i, entry := range data.Entries {
+		entryID := entry.ID
+		if entryID == "" {
+			entryID = fmt.Sprintf("entry_%d", i+1)
+		}
+
+		blocks[i] = ContentBlock{
+			ID:      entryID,
+			Type:    BlockTypeCustom,
+			Content: entry.Content,
+			Page:    1, // Custom data doesn't have pages
+			Semantic: SemanticInfo{
+				Section: data.Source, // Use source as section for grouping
+			},
+		}
+
+		totalSize += len(entry.Content)
+	}
+
+	name := data.Name
+	if config.Name != "" {
+		name = config.Name
+	}
+
+	doc := &Document{
+		Info: DocumentInfo{
+			ID:          docID,
+			Name:        name,
+			Format:      FormatCustomData,
+			SizeBytes:   int64(totalSize),
+			PageCount:   1,
+			Source:      data.Source,
+			Description: data.Description,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+			ImportedAt:  importedAt,
+		},
+		Content: DocumentContent{
+			Version: "1.0",
+			Blocks:  blocks,
+		},
+	}
+
+	// Save to SQLite
+	if err := s.db.SaveDocument(toSQLiteDocument(doc)); err != nil {
+		return nil, fmt.Errorf("save document: %w", err)
+	}
+
+	// Save tags if provided
+	if len(data.Tags) > 0 {
+		if err := s.db.SaveDocumentTags(docID, data.Tags); err != nil {
+			return nil, fmt.Errorf("save tags: %w", err)
+		}
+	}
+
+	// Index for BM25 search
+	sqliteBlocks := toSQLiteBlocks(doc)
+	// Add entry metadata to blocks
+	for i, entry := range data.Entries {
+		if len(entry.Metadata) > 0 {
+			sqliteBlocks[i].EntryMetadata = entry.Metadata
+		}
+	}
+
+	if err := s.db.IndexDocument(doc.Info.ID, sqliteBlocks); err != nil {
+		return nil, fmt.Errorf("index document: %w", err)
+	}
+
+	// Generate embeddings if provider configured
+	if s.embedder != nil {
+		if err := s.embedDocument(doc); err != nil {
+			fmt.Printf("warning: embedding failed: %v\n", err)
+		}
+	}
+
+	return doc, nil
+}
+
+// UpsertCustomData updates an existing document or creates a new one based on source + external_id.
+// If ExternalID is provided and a document with the same source + external_id exists, it will be updated.
+// If ExternalID is empty or no matching document exists, a new document is created.
+func (s *Store) UpsertCustomData(data *CustomData, opts ...IndexOption) (*Document, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	config := defaultIndexConfig()
+	for _, opt := range opts {
+		opt(config)
+	}
+
+	// Validate input
+	if data == nil {
+		return nil, NewCustomDataError("", "data is nil", ErrInvalidCustomData)
+	}
+	if data.Source == "" {
+		return nil, NewCustomDataError("", "source is required", ErrMissingSource)
+	}
+	if data.Name == "" {
+		return nil, NewCustomDataError(data.Source, "name is required", ErrInvalidCustomData)
+	}
+	if len(data.Entries) == 0 {
+		return nil, NewCustomDataError(data.Source, "at least one entry is required", ErrMissingEntries)
+	}
+
+	// Check if document exists by source + external_id
+	var existingDoc *sqlite.DocumentInfo
+	var err error
+	if data.ExternalID != "" {
+		existingDoc, err = s.db.FindBySourceAndExternalID(data.Source, data.ExternalID)
+		if err != nil {
+			return nil, fmt.Errorf("find existing document: %w", err)
+		}
+	}
+
+	now := time.Now()
+
+	// Use provided import time or default to now
+	importedAt := data.ImportedAt
+	if importedAt.IsZero() {
+		importedAt = now
+	}
+
+	// Determine document ID - reuse existing or generate new
+	var docID string
+	var createdAt time.Time
+	if existingDoc != nil {
+		docID = existingDoc.ID
+		createdAt = existingDoc.CreatedAt // Preserve original creation time
+
+		// Delete existing vectors from HNSW before re-indexing
+		if s.hnsw != nil {
+			vectors, _ := s.db.GetVectorsForDocument(docID)
+			for _, v := range vectors {
+				hnswID := fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID)
+				s.hnsw.Delete(hnswID)
+			}
+		}
+	} else {
+		docID = generateID()
+		createdAt = now
+	}
+
+	// Convert entries to content blocks
+	blocks := make([]ContentBlock, len(data.Entries))
+	var totalSize int
+
+	for i, entry := range data.Entries {
+		entryID := entry.ID
+		if entryID == "" {
+			entryID = fmt.Sprintf("entry_%d", i+1)
+		}
+
+		blocks[i] = ContentBlock{
+			ID:      entryID,
+			Type:    BlockTypeCustom,
+			Content: entry.Content,
+			Page:    1, // Custom data doesn't have pages
+			Semantic: SemanticInfo{
+				Section: data.Source, // Use source as section for grouping
+			},
+		}
+
+		totalSize += len(entry.Content)
+	}
+
+	name := data.Name
+	if config.Name != "" {
+		name = config.Name
+	}
+
+	doc := &Document{
+		Info: DocumentInfo{
+			ID:          docID,
+			Name:        name,
+			Format:      FormatCustomData,
+			SizeBytes:   int64(totalSize),
+			PageCount:   1,
+			Source:      data.Source,
+			Description: data.Description,
+			CreatedAt:   createdAt,
+			UpdatedAt:   now,
+			ImportedAt:  importedAt,
+			ExternalID:  data.ExternalID,
+		},
+		Content: DocumentContent{
+			Version: "1.0",
+			Blocks:  blocks,
+		},
+	}
+
+	// Save to SQLite (INSERT OR REPLACE)
+	if err := s.db.SaveDocument(toSQLiteDocument(doc)); err != nil {
+		return nil, fmt.Errorf("save document: %w", err)
+	}
+
+	// Save tags if provided (this will replace existing tags)
+	if len(data.Tags) > 0 {
+		if err := s.db.SaveDocumentTags(docID, data.Tags); err != nil {
+			return nil, fmt.Errorf("save tags: %w", err)
+		}
+	}
+
+	// Index for BM25 search
+	sqliteBlocks := toSQLiteBlocks(doc)
+	// Add entry metadata to blocks
+	for i, entry := range data.Entries {
+		if len(entry.Metadata) > 0 {
+			sqliteBlocks[i].EntryMetadata = entry.Metadata
+		}
+	}
+
+	if err := s.db.IndexDocument(doc.Info.ID, sqliteBlocks); err != nil {
+		return nil, fmt.Errorf("index document: %w", err)
+	}
+
+	// Generate embeddings if provider configured
+	if s.embedder != nil {
+		if err := s.embedDocument(doc); err != nil {
+			fmt.Printf("warning: embedding failed: %v\n", err)
+		}
+	}
+
+	return doc, nil
+}
+
 // IndexReader indexes a document from an io.Reader
 func (s *Store) IndexReader(r io.Reader, name string, opts ...IndexOption) (*Document, error) {
 	s.mu.Lock()
@@ -598,6 +860,41 @@ func (s *Store) Search(query string, opts ...SearchOption) (*SearchResults, erro
 		return nil, ErrInvalidQuery
 	}
 
+	// Resolve document filters from sources and tags
+	var filterDocIDs []string
+
+	// Filter by sources
+	if len(config.Sources) > 0 {
+		sourceDocIDs, err := s.db.GetDocumentIDsBySources(config.Sources)
+		if err != nil {
+			return nil, fmt.Errorf("filter by sources: %w", err)
+		}
+		filterDocIDs = sourceDocIDs
+	}
+
+	// Filter by tags
+	if len(config.Tags) > 0 {
+		tagDocIDs, err := s.db.GetDocumentIDsByTags(config.Tags)
+		if err != nil {
+			return nil, fmt.Errorf("filter by tags: %w", err)
+		}
+
+		if filterDocIDs != nil {
+			// Intersect with source filter
+			filterDocIDs = intersectStrings(filterDocIDs, tagDocIDs)
+		} else {
+			filterDocIDs = tagDocIDs
+		}
+	}
+
+	// Merge with explicit document filter
+	if filterDocIDs != nil {
+		if len(config.DocumentIDs) > 0 {
+			filterDocIDs = intersectStrings(filterDocIDs, config.DocumentIDs)
+		}
+		config.DocumentIDs = filterDocIDs
+	}
+
 	// Use hybrid searcher
 	hybridOpts := &hsearch.HybridSearchOptions{
 		Mode:          hsearch.SearchMode(config.SearchMode),
@@ -772,6 +1069,15 @@ func (s *Store) getContextLocked(docID, blockID string, windowSize int) (*Contex
 	}
 
 	return result, nil
+}
+
+// GetLastImportTime returns the most recent import timestamp for a given source
+// Returns zero time if no imports found for the source
+func (s *Store) GetLastImportTime(source string) (time.Time, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.db.GetLastImportTime(source)
 }
 
 // Close releases resources held by the store
@@ -984,6 +1290,10 @@ func toSQLiteDocument(doc *Document) *sqlite.Document {
 			Checksum:     doc.Info.Checksum,
 			CreatedAt:    doc.Info.CreatedAt,
 			UpdatedAt:    doc.Info.UpdatedAt,
+			Source:       doc.Info.Source,
+			Description:  doc.Info.Description,
+			ImportedAt:   doc.Info.ImportedAt,
+			ExternalID:   doc.Info.ExternalID,
 		},
 		Blocks: make([]sqlite.ContentBlock, len(doc.Content.Blocks)),
 	}
@@ -1065,6 +1375,10 @@ func fromSQLiteDocument(sqliteDoc *sqlite.Document) *Document {
 			Checksum:     sqliteDoc.Info.Checksum,
 			CreatedAt:    sqliteDoc.Info.CreatedAt,
 			UpdatedAt:    sqliteDoc.Info.UpdatedAt,
+			Source:       sqliteDoc.Info.Source,
+			Description:  sqliteDoc.Info.Description,
+			ImportedAt:   sqliteDoc.Info.ImportedAt,
+			ExternalID:   sqliteDoc.Info.ExternalID,
 		},
 		Content: DocumentContent{
 			Version: "1.0",
@@ -1130,7 +1444,26 @@ func fromSQLiteDocumentInfos(infos []sqlite.DocumentInfo) []*DocumentInfo {
 			Checksum:     infos[i].Checksum,
 			CreatedAt:    infos[i].CreatedAt,
 			UpdatedAt:    infos[i].UpdatedAt,
+			Source:       infos[i].Source,
+			Description:  infos[i].Description,
+			ImportedAt:   infos[i].ImportedAt,
+			ExternalID:   infos[i].ExternalID,
 		}
 	}
 	return out
+}
+
+// intersectStrings returns the intersection of two string slices
+func intersectStrings(a, b []string) []string {
+	set := make(map[string]bool)
+	for _, s := range a {
+		set[s] = true
+	}
+	var result []string
+	for _, s := range b {
+		if set[s] {
+			result = append(result, s)
+		}
+	}
+	return result
 }

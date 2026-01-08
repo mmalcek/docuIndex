@@ -112,11 +112,13 @@ type searchConfig struct {
 	HighlightPre  string   // Prefix for highlighting matches
 	HighlightPost string   // Suffix for highlighting matches
 	PageRange     *struct{ Start, End int }
-	DocumentIDs   []string   // Limit to specific documents
-	IncludeImages bool       // Include image blocks in results
-	SearchMode    SearchMode // Search mode: keyword, semantic, or hybrid
-	VectorWeight  float64    // Weight for vector search in hybrid mode
-	KeywordWeight float64    // Weight for keyword search in hybrid mode
+	DocumentIDs   []string          // Limit to specific documents
+	IncludeImages bool              // Include image blocks in results
+	SearchMode    SearchMode        // Search mode: keyword, semantic, or hybrid
+	VectorWeight  float64           // Weight for vector search in hybrid mode
+	KeywordWeight float64           // Weight for keyword search in hybrid mode
+	Sources       []string          // Filter by source or format (e.g., "pdf", "crm")
+	Tags          map[string]string // Filter by tags (AND logic)
 }
 
 func defaultSearchConfig() *searchConfig {
@@ -264,5 +266,19 @@ func WithKeywordWeight(weight float64) SearchOption {
 		if weight >= 0 && weight <= 1 {
 			c.KeywordWeight = weight
 		}
+	}
+}
+
+// WithSources filters search results by source or format (e.g., "pdf", "docx", "crm")
+func WithSources(sources ...string) SearchOption {
+	return func(c *searchConfig) {
+		c.Sources = sources
+	}
+}
+
+// WithTags filters search results by tags (AND logic - all must match)
+func WithTags(tags map[string]string) SearchOption {
+	return func(c *searchConfig) {
+		c.Tags = tags
 	}
 }

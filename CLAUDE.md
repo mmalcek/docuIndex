@@ -51,7 +51,8 @@ docuindex/
 │   ├── blocks.go      # Content block operations
 │   ├── search.go      # BM25 search on SQLite
 │   ├── vectors.go     # Vector storage as BLOBs
-│   └── images.go      # Image metadata + file management
+│   ├── images.go      # Image metadata + file management
+│   └── tags.go        # Document tag operations
 │
 ├── embedding/          # Embedding providers
 │   ├── provider.go    # Provider interface + factory
@@ -84,11 +85,12 @@ docuindex/
 2. **Unified SQLite Storage**: Single `docuindex.db` file for all metadata (documents, blocks, search index, vectors)
 3. **PostScript interpreter**: Proper PDF content stream parsing with stack-based interpreter
 4. **DOCX via ZIP+XML**: DOCX files parsed as ZIP archives with XML content using `archive/zip` and `encoding/xml`
-5. **AI-optimized output**: Semantic blocks with context, positions, and metadata
-6. **Hybrid Search**: BM25 keyword search + optional vector semantic search with RRF fusion
-7. **Optional Embeddings**: Embedding providers (Azure, OpenAI, Ollama) are optional - works without them
-8. **Thread-safe**: Concurrent document processing with `sync.RWMutex`
-9. **Security limits**: Memory and recursion limits to prevent DoS attacks
+5. **Custom Data Sources**: Index arbitrary structured data alongside documents with tag-based filtering
+6. **AI-optimized output**: Semantic blocks with context, positions, and metadata
+7. **Hybrid Search**: BM25 keyword search + optional vector semantic search with RRF fusion
+8. **Optional Embeddings**: Embedding providers (Azure, OpenAI, Ollama) are optional - works without them
+9. **Thread-safe**: Concurrent document processing with `sync.RWMutex`
+10. **Security limits**: Memory and recursion limits to prevent DoS attacks
 
 ## Architecture
 
@@ -116,8 +118,15 @@ CREATE TABLE documents (
     page_count INTEGER,
     checksum TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    source TEXT DEFAULT '',      -- CustomData source identifier
+    description TEXT DEFAULT '', -- CustomData description
+    imported_at TEXT DEFAULT '', -- CustomData import timestamp
+    external_id TEXT DEFAULT ''  -- External identifier for upsert
 );
+
+-- Unique index for upsert by source + external_id
+CREATE UNIQUE INDEX idx_documents_source_external ON documents(source, external_id) WHERE external_id != '';
 
 -- Content blocks table
 CREATE TABLE content_blocks (
@@ -128,6 +137,7 @@ CREATE TABLE content_blocks (
     page INTEGER,
     sequence INTEGER,
     -- Bounding box, font info, semantic info...
+    entry_metadata TEXT DEFAULT '',  -- CustomData entry metadata (JSON)
     PRIMARY KEY (document_id, id),
     FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
 );
@@ -165,15 +175,24 @@ CREATE TABLE images (
     page INTEGER,
     original_name TEXT
 );
+
+-- Document tags for filtering
+CREATE TABLE document_tags (
+    document_id TEXT NOT NULL,
+    tag_key TEXT NOT NULL,
+    tag_value TEXT NOT NULL,
+    PRIMARY KEY (document_id, tag_key),
+    FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+);
 ```
 
 ## Core Types
 
 | Type | Description |
 |------|-------------|
-| `ContentBlock` | Unit of content (text/image) with position and semantics |
+| `ContentBlock` | Unit of content (text/image/custom) with position and semantics |
 | `Document` | Parsed document with metadata and content blocks |
-| `DocumentInfo` | Metadata (ID, Name, Size, PageCount, Format, Checksum, Timestamps) |
+| `DocumentInfo` | Metadata (ID, Name, Size, PageCount, Format, Source, Description, ImportedAt, ExternalID, Timestamps) |
 | `Store` | Document storage and search interface |
 | `SearchResult` | Search hit with score, snippet, and context |
 | `SearchResults` | Query results with timing and total hits |
@@ -182,6 +201,8 @@ CREATE TABLE images (
 | `FontInfo` | Font name, size, bold, italic flags |
 | `ContextResult` | Before/Center/After blocks for RAG |
 | `SearchMode` | Search type: keyword, semantic, or hybrid |
+| `CustomData` | Structured data source with entries, tags, ImportedAt, and ExternalID for upsert |
+| `DataEntry` | Single entry in custom data with content and metadata |
 
 ## Public API
 
@@ -196,6 +217,37 @@ doc, err := store.IndexDocument("/path/to/file.docx")
 // Index from io.Reader
 doc, err := store.IndexReader(reader, "filename.pdf")
 
+// Index custom data (creates new document each time)
+doc, err := store.IndexCustomData(&docuindex.CustomData{
+    Source:      "crm",
+    Name:        "Customer Notes",
+    Description: "CRM exported notes",
+    Tags:        map[string]string{"team": "sales", "quarter": "Q4"},
+    ImportedAt:  time.Now(), // Optional: defaults to now if not set
+    Entries: []docuindex.DataEntry{
+        {Content: "Meeting with Acme Corp..."},
+        {Content: "Follow-up call scheduled..."},
+    },
+})
+
+// Upsert custom data (update if source + external_id exists, else create)
+doc, err := store.UpsertCustomData(&docuindex.CustomData{
+    Source:      "salesforce",
+    Name:        "Q4 Opportunities",
+    ExternalID:  "opps-q4-2024",  // Optional - enables update-or-create behavior
+    ImportedAt:  time.Now(),
+    Entries: []docuindex.DataEntry{
+        {Content: "Acme Corp - $50k deal in progress..."},
+        {Content: "Widget Inc - Renewal pending..."},
+    },
+})
+
+// Get last import time for incremental updates
+lastImport, err := store.GetLastImportTime("crm")
+if !lastImport.IsZero() {
+    // Fetch only new data since lastImport
+}
+
 // Search across all documents (keyword search by default)
 results, err := store.Search("query terms", docuindex.WithMaxResults(10))
 
@@ -208,6 +260,12 @@ results, err := store.Search("query terms",
 
 // Search within specific document
 results, err := store.SearchInDocument(docID, "query")
+
+// Search with source/tag filtering
+results, err := store.Search("query",
+    docuindex.WithSources("crm", "pdf"),       // Filter by source or format
+    docuindex.WithTags(map[string]string{"team": "sales"}),  // Filter by tags
+)
 
 // Get context for RAG
 context, err := store.GetContext(docID, blockID, windowSize)
@@ -257,6 +315,8 @@ docuindex.WithSections(...strings)     // Filter by section
 docuindex.WithSearchMode(mode)         // keyword, semantic, or hybrid
 docuindex.WithVectorWeight(float64)    // Weight for vector search (0-1)
 docuindex.WithKeywordWeight(float64)   // Weight for keyword search (0-1)
+docuindex.WithSources(...strings)      // Filter by source or format
+docuindex.WithTags(map[string]string)  // Filter by tags (AND logic)
 ```
 
 ### Embedding Providers
@@ -407,6 +467,8 @@ go run main.go full-test /path/to/file.docx  # Run all tests with DOCX
 | Add DOCX content extraction | `docx/text.go` or `docx/semantic.go` |
 | Add embedding provider | `embedding/` directory |
 | Modify hybrid search fusion | `search/fusion.go` |
+| Add custom data indexing | `docuindex.go` IndexCustomData() |
+| Add tag filtering | `sqlite/tags.go` |
 
 ## Dependencies
 
@@ -433,6 +495,7 @@ Standard library:
 - `ErrUnsupportedFeature`, `ErrUnsupportedEncoding` - Unimplemented features
 - `ErrDocumentNotFound`, `ErrDocumentExists` - Storage errors
 - `ErrSearchFailed`, `ErrInvalidQuery` - Search errors
+- `ErrInvalidCustomData`, `ErrMissingSource`, `ErrMissingEntries` - CustomData errors
 
 ### Structured Error Types
 - `ParseError` - PDF offset + operation context
@@ -442,6 +505,7 @@ Standard library:
 - `FontError` - Font processing errors
 - `DOCXError` - DOCX part + message
 - `StorageError`, `SearchError` - Operation failures
+- `CustomDataError` - CustomData source + message
 
 ### Error Checking
 ```go
@@ -449,6 +513,7 @@ if docuindex.IsParseError(err) { ... }
 if docuindex.IsDOCXError(err) { ... }
 if docuindex.IsStorageError(err) { ... }
 if docuindex.IsSearchError(err) { ... }
+if docuindex.IsCustomDataError(err) { ... }
 ```
 
 ## Security Limits

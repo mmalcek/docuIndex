@@ -9,6 +9,7 @@ A pure Go package for parsing PDF and DOCX files and extracting structured conte
 - **Pure Go** - No CGO or external dependencies
 - **PDF Parsing** - Complete PDF parser with PostScript content stream interpreter
 - **DOCX Parsing** - Full DOCX support via ZIP/XML parsing with style resolution
+- **Custom Data Sources** - Index arbitrary structured data with tag-based filtering
 - **Text Extraction** - Extract text with positioning, font info, and semantic structure
 - **Image Extraction** - Extract embedded images (JPEG, PNG, GIF, BMP, TIFF)
 - **Semantic Analysis** - Automatic heading detection, section tracking, keyword extraction
@@ -134,6 +135,45 @@ doc, err := store.IndexDocument("./document.pdf",
 )
 ```
 
+#### Index Custom Data
+
+```go
+// Index structured data from any source (creates new document each time)
+doc, err := store.IndexCustomData(&docuindex.CustomData{
+    Source:      "crm-api",
+    Name:        "Customer Notes Q4 2024",
+    Description: "Extracted customer interaction notes",
+    Tags: map[string]string{
+        "quarter": "Q4-2024",
+        "type":    "customer-notes",
+    },
+    ImportedAt: time.Now(), // Optional: track import time for incremental updates
+    Entries: []docuindex.DataEntry{
+        {Content: "Meeting with Acme Corp about renewal..."},
+        {Content: "Support ticket #1234: User reported issue..."},
+        {Content: "Sales call summary: Interested in enterprise plan..."},
+    },
+})
+
+// Upsert custom data (update existing document if source + external_id match)
+doc, err := store.UpsertCustomData(&docuindex.CustomData{
+    Source:      "salesforce-api",
+    Name:        "Salesforce Opportunities",
+    ExternalID:  "opportunities-q4",  // Optional - enables update-or-create behavior
+    ImportedAt:  time.Now(),
+    Entries: []docuindex.DataEntry{
+        {Content: "Acme Corp - $50k deal in progress..."},
+        {Content: "Widget Inc - Renewal pending..."},
+    },
+})
+
+// Get last import time for incremental updates
+lastImport, err := store.GetLastImportTime("crm-api")
+if !lastImport.IsZero() {
+    // Fetch only new data from source since lastImport
+}
+```
+
 #### Retrieve Documents
 
 ```go
@@ -213,6 +253,27 @@ results, err := store.Search(`"exact phrase match"`)
 
 ```go
 results, err := store.SearchInDocument("doc-id", "query")
+```
+
+#### Search with Source/Tag Filtering
+
+```go
+// Search only custom data
+results, err := store.Search("renewal",
+    docuindex.WithSources("customdata"))
+
+// Search by specific source
+results, err := store.Search("renewal",
+    docuindex.WithSources("crm-api"))
+
+// Search with tag filter
+results, err := store.Search("renewal",
+    docuindex.WithTags(map[string]string{"quarter": "Q4-2024"}))
+
+// Combined filters
+results, err := store.Search("enterprise",
+    docuindex.WithSources("crm-api", "faq"),
+    docuindex.WithTags(map[string]string{"type": "customer-notes"}))
 ```
 
 #### Get Context for RAG

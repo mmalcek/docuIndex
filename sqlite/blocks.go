@@ -7,27 +7,28 @@ import (
 
 // ContentBlock represents a content block stored in SQLite
 type ContentBlock struct {
-	ID           string
-	Type         string
-	Content      string
-	Page         int
-	Sequence     int
-	BBoxX        float64
-	BBoxY        float64
-	BBoxWidth    float64
-	BBoxHeight   float64
-	PageWidth    float64
-	PageHeight   float64
-	FontName     string
-	FontSize     float64
-	FontBold     bool
-	FontItalic   bool
-	IsHeading    bool
-	HeadingLevel int
-	Section      string
-	Keywords     []string
-	Context      string
-	Children     []string
+	ID            string
+	Type          string
+	Content       string
+	Page          int
+	Sequence      int
+	BBoxX         float64
+	BBoxY         float64
+	BBoxWidth     float64
+	BBoxHeight    float64
+	PageWidth     float64
+	PageHeight    float64
+	FontName      string
+	FontSize      float64
+	FontBold      bool
+	FontItalic    bool
+	IsHeading     bool
+	HeadingLevel  int
+	Section       string
+	Keywords      []string
+	Context       string
+	Children      []string
+	EntryMetadata map[string]string // CustomData entry-specific metadata
 }
 
 // saveBlocksTx saves blocks within a transaction
@@ -37,8 +38,8 @@ func saveBlocksTx(tx *sql.Tx, documentID string, blocks []ContentBlock) error {
 			id, document_id, type, content, page, sequence,
 			bbox_x, bbox_y, bbox_width, bbox_height, page_width, page_height,
 			font_name, font_size, font_bold, font_italic,
-			is_heading, heading_level, section, keywords, context, children
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			is_heading, heading_level, section, keywords, context, children, entry_metadata
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("prepare block insert: %w", err)
@@ -69,6 +70,7 @@ func saveBlocksTx(tx *sql.Tx, documentID string, blocks []ContentBlock) error {
 			jsonMarshal(block.Keywords),
 			block.Context,
 			jsonMarshal(block.Children),
+			jsonMarshal(block.EntryMetadata),
 		)
 		if err != nil {
 			return fmt.Errorf("insert block %s: %w", block.ID, err)
@@ -110,7 +112,7 @@ func (s *Store) GetBlocksByDocument(documentID string) ([]ContentBlock, error) {
 			id, type, content, page, sequence,
 			bbox_x, bbox_y, bbox_width, bbox_height, page_width, page_height,
 			font_name, font_size, font_bold, font_italic,
-			is_heading, heading_level, section, keywords, context, children
+			is_heading, heading_level, section, keywords, context, children, entry_metadata
 		FROM content_blocks
 		WHERE document_id = ?
 		ORDER BY sequence
@@ -130,7 +132,7 @@ func (s *Store) GetBlocksByPage(documentID string, page int) ([]ContentBlock, er
 			id, type, content, page, sequence,
 			bbox_x, bbox_y, bbox_width, bbox_height, page_width, page_height,
 			font_name, font_size, font_bold, font_italic,
-			is_heading, heading_level, section, keywords, context, children
+			is_heading, heading_level, section, keywords, context, children, entry_metadata
 		FROM content_blocks
 		WHERE document_id = ? AND page = ?
 		ORDER BY sequence
@@ -147,7 +149,7 @@ func (s *Store) GetBlocksByPage(documentID string, page int) ([]ContentBlock, er
 func (s *Store) GetBlockByID(documentID, blockID string) (*ContentBlock, error) {
 	var block ContentBlock
 	var fontBold, fontItalic, isHeading int
-	var keywords, children string
+	var keywords, children, entryMetadata string
 	var fontName sql.NullString
 	var fontSizeNull sql.NullFloat64
 
@@ -156,7 +158,7 @@ func (s *Store) GetBlockByID(documentID, blockID string) (*ContentBlock, error) 
 			id, type, content, page, sequence,
 			bbox_x, bbox_y, bbox_width, bbox_height, page_width, page_height,
 			font_name, font_size, font_bold, font_italic,
-			is_heading, heading_level, section, keywords, context, children
+			is_heading, heading_level, section, keywords, context, children, entry_metadata
 		FROM content_blocks
 		WHERE document_id = ? AND id = ?
 	`, documentID, blockID).Scan(
@@ -181,6 +183,7 @@ func (s *Store) GetBlockByID(documentID, blockID string) (*ContentBlock, error) 
 		&keywords,
 		&block.Context,
 		&children,
+		&entryMetadata,
 	)
 
 	if err == sql.ErrNoRows {
@@ -199,6 +202,7 @@ func (s *Store) GetBlockByID(documentID, blockID string) (*ContentBlock, error) 
 	block.IsHeading = isHeading != 0
 	jsonUnmarshal(keywords, &block.Keywords)
 	jsonUnmarshal(children, &block.Children)
+	jsonUnmarshal(entryMetadata, &block.EntryMetadata)
 
 	return &block, nil
 }
@@ -249,7 +253,7 @@ func (s *Store) GetContextBlocks(documentID, blockID string, windowSize int) (be
 			id, type, content, page, sequence,
 			bbox_x, bbox_y, bbox_width, bbox_height, page_width, page_height,
 			font_name, font_size, font_bold, font_italic,
-			is_heading, heading_level, section, keywords, context, children
+			is_heading, heading_level, section, keywords, context, children, entry_metadata
 		FROM content_blocks
 		WHERE document_id = ? AND sequence < ? AND sequence >= ?
 		ORDER BY sequence
@@ -276,7 +280,7 @@ func (s *Store) GetContextBlocks(documentID, blockID string, windowSize int) (be
 			id, type, content, page, sequence,
 			bbox_x, bbox_y, bbox_width, bbox_height, page_width, page_height,
 			font_name, font_size, font_bold, font_italic,
-			is_heading, heading_level, section, keywords, context, children
+			is_heading, heading_level, section, keywords, context, children, entry_metadata
 		FROM content_blocks
 		WHERE document_id = ? AND sequence > ? AND sequence <= ?
 		ORDER BY sequence
@@ -300,7 +304,7 @@ func scanBlocks(rows *sql.Rows) ([]ContentBlock, error) {
 	for rows.Next() {
 		var block ContentBlock
 		var fontBold, fontItalic, isHeading int
-		var keywords, children string
+		var keywords, children, entryMetadata string
 		var fontName sql.NullString
 		var fontSizeNull sql.NullFloat64
 
@@ -326,6 +330,7 @@ func scanBlocks(rows *sql.Rows) ([]ContentBlock, error) {
 			&keywords,
 			&block.Context,
 			&children,
+			&entryMetadata,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan block: %w", err)
@@ -340,6 +345,7 @@ func scanBlocks(rows *sql.Rows) ([]ContentBlock, error) {
 		block.IsHeading = isHeading != 0
 		jsonUnmarshal(keywords, &block.Keywords)
 		jsonUnmarshal(children, &block.Children)
+		jsonUnmarshal(entryMetadata, &block.EntryMetadata)
 
 		blocks = append(blocks, block)
 	}

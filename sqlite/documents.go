@@ -18,6 +18,10 @@ type DocumentInfo struct {
 	Checksum     string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+	Source       string    // CustomData source identifier
+	Description  string    // CustomData description
+	ImportedAt   time.Time // CustomData import timestamp (for incremental updates)
+	ExternalID   string    // External identifier for upsert
 }
 
 // Document represents a stored document with its content
@@ -39,9 +43,14 @@ func (s *Store) SaveDocument(doc *Document) error {
 	defer tx.Rollback()
 
 	// Insert or update document
+	var importedAt string
+	if !doc.Info.ImportedAt.IsZero() {
+		importedAt = doc.Info.ImportedAt.UTC().Format(time.RFC3339)
+	}
+
 	_, err = tx.Exec(`
-		INSERT OR REPLACE INTO documents (id, name, original_path, format, size_bytes, page_count, checksum, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT OR REPLACE INTO documents (id, name, original_path, format, size_bytes, page_count, checksum, created_at, updated_at, source, description, imported_at, external_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		doc.Info.ID,
 		doc.Info.Name,
@@ -52,6 +61,10 @@ func (s *Store) SaveDocument(doc *Document) error {
 		doc.Info.Checksum,
 		doc.Info.CreatedAt.UTC().Format(time.RFC3339),
 		doc.Info.UpdatedAt.UTC().Format(time.RFC3339),
+		doc.Info.Source,
+		doc.Info.Description,
+		importedAt,
+		doc.Info.ExternalID,
 	)
 	if err != nil {
 		return fmt.Errorf("insert document: %w", err)
@@ -79,9 +92,10 @@ func (s *Store) GetDocument(id string) (*Document, error) {
 	// Get document info
 	var doc Document
 	var createdAt, updatedAt string
+	var source, description, importedAt, externalID sql.NullString
 
 	err := s.db.QueryRow(`
-		SELECT id, name, original_path, format, size_bytes, page_count, checksum, created_at, updated_at
+		SELECT id, name, original_path, format, size_bytes, page_count, checksum, created_at, updated_at, source, description, imported_at, external_id
 		FROM documents WHERE id = ?
 	`, id).Scan(
 		&doc.Info.ID,
@@ -93,6 +107,10 @@ func (s *Store) GetDocument(id string) (*Document, error) {
 		&doc.Info.Checksum,
 		&createdAt,
 		&updatedAt,
+		&source,
+		&description,
+		&importedAt,
+		&externalID,
 	)
 
 	if err == sql.ErrNoRows {
@@ -105,6 +123,12 @@ func (s *Store) GetDocument(id string) (*Document, error) {
 	// Parse timestamps
 	doc.Info.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 	doc.Info.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+	doc.Info.Source = source.String
+	doc.Info.Description = description.String
+	doc.Info.ExternalID = externalID.String
+	if importedAt.String != "" {
+		doc.Info.ImportedAt, _ = time.Parse(time.RFC3339, importedAt.String)
+	}
 
 	// Get blocks
 	blocks, err := s.GetBlocksByDocument(id)
@@ -123,7 +147,7 @@ func (s *Store) ListDocuments() ([]DocumentInfo, error) {
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(`
-		SELECT id, name, original_path, format, size_bytes, page_count, checksum, created_at, updated_at
+		SELECT id, name, original_path, format, size_bytes, page_count, checksum, created_at, updated_at, source, description, imported_at, external_id
 		FROM documents ORDER BY created_at DESC
 	`)
 	if err != nil {
@@ -135,6 +159,7 @@ func (s *Store) ListDocuments() ([]DocumentInfo, error) {
 	for rows.Next() {
 		var doc DocumentInfo
 		var createdAt, updatedAt string
+		var source, description, importedAt, externalID sql.NullString
 
 		err := rows.Scan(
 			&doc.ID,
@@ -146,6 +171,10 @@ func (s *Store) ListDocuments() ([]DocumentInfo, error) {
 			&doc.Checksum,
 			&createdAt,
 			&updatedAt,
+			&source,
+			&description,
+			&importedAt,
+			&externalID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan document: %w", err)
@@ -153,6 +182,12 @@ func (s *Store) ListDocuments() ([]DocumentInfo, error) {
 
 		doc.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 		doc.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+		doc.Source = source.String
+		doc.Description = description.String
+		doc.ExternalID = externalID.String
+		if importedAt.String != "" {
+			doc.ImportedAt, _ = time.Parse(time.RFC3339, importedAt.String)
+		}
 
 		docs = append(docs, doc)
 	}
@@ -183,6 +218,58 @@ func (s *Store) DeleteDocument(id string) error {
 	}
 
 	return tx.Commit()
+}
+
+// FindBySourceAndExternalID finds a document by source and external ID
+// Returns nil if not found (not an error)
+func (s *Store) FindBySourceAndExternalID(source, externalID string) (*DocumentInfo, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if source == "" || externalID == "" {
+		return nil, nil
+	}
+
+	var doc DocumentInfo
+	var createdAt, updatedAt string
+	var srcNull, description, importedAt, extID sql.NullString
+
+	err := s.db.QueryRow(`
+		SELECT id, name, original_path, format, size_bytes, page_count, checksum, created_at, updated_at, source, description, imported_at, external_id
+		FROM documents WHERE source = ? AND external_id = ?
+	`, source, externalID).Scan(
+		&doc.ID,
+		&doc.Name,
+		&doc.OriginalPath,
+		&doc.Format,
+		&doc.SizeBytes,
+		&doc.PageCount,
+		&doc.Checksum,
+		&createdAt,
+		&updatedAt,
+		&srcNull,
+		&description,
+		&importedAt,
+		&extID,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, nil // Not found is not an error
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query document by source/external_id: %w", err)
+	}
+
+	doc.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	doc.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+	doc.Source = srcNull.String
+	doc.Description = description.String
+	doc.ExternalID = extID.String
+	if importedAt.String != "" {
+		doc.ImportedAt, _ = time.Parse(time.RFC3339, importedAt.String)
+	}
+
+	return &doc, nil
 }
 
 // DocumentExists checks if a document exists

@@ -39,6 +39,11 @@ var (
 	// General errors
 	ErrInvalidInput = errors.New("invalid input")
 	ErrIOError      = errors.New("I/O error")
+
+	// CustomData errors
+	ErrInvalidCustomData = errors.New("invalid custom data")
+	ErrMissingSource     = errors.New("custom data source is required")
+	ErrMissingEntries    = errors.New("custom data must have at least one entry")
 )
 
 // ParseError provides detailed information about PDF parsing failures
@@ -273,4 +278,37 @@ func IsStorageError(err error) bool {
 func IsSearchError(err error) bool {
 	var searchErr *SearchError
 	return errors.As(err, &searchErr)
+}
+
+// CustomDataError indicates a custom data processing error
+type CustomDataError struct {
+	Source  string // Source identifier
+	Message string // What went wrong
+	Err     error  // Underlying error
+}
+
+func (e *CustomDataError) Error() string {
+	if e.Source != "" {
+		return fmt.Sprintf("custom data '%s': %s", e.Source, e.Message)
+	}
+	return fmt.Sprintf("custom data: %s", e.Message)
+}
+
+func (e *CustomDataError) Unwrap() error {
+	return e.Err
+}
+
+// NewCustomDataError creates a new CustomDataError
+func NewCustomDataError(source, message string, err error) *CustomDataError {
+	return &CustomDataError{
+		Source:  source,
+		Message: message,
+		Err:     err,
+	}
+}
+
+// IsCustomDataError checks if an error is a custom data error
+func IsCustomDataError(err error) bool {
+	var cdErr *CustomDataError
+	return errors.As(err, &cdErr)
 }

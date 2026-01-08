@@ -26,7 +26,11 @@ CREATE TABLE IF NOT EXISTS documents (
     page_count INTEGER,
     checksum TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    source TEXT DEFAULT '',
+    description TEXT DEFAULT '',
+    imported_at TEXT DEFAULT '',
+    external_id TEXT DEFAULT ''
 );
 
 -- Content blocks table
@@ -53,6 +57,7 @@ CREATE TABLE IF NOT EXISTS content_blocks (
     keywords TEXT,
     context TEXT,
     children TEXT,
+    entry_metadata TEXT DEFAULT '',
     PRIMARY KEY (document_id, id),
     FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
 );
@@ -109,6 +114,15 @@ CREATE TABLE IF NOT EXISTS images (
     FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
 );
 
+-- Document tags for filtering
+CREATE TABLE IF NOT EXISTS document_tags (
+    document_id TEXT NOT NULL,
+    tag_key TEXT NOT NULL,
+    tag_value TEXT NOT NULL,
+    PRIMARY KEY (document_id, tag_key),
+    FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+);
+
 -- Indexes for query performance
 CREATE INDEX IF NOT EXISTS idx_blocks_document ON content_blocks(document_id);
 CREATE INDEX IF NOT EXISTS idx_blocks_page ON content_blocks(document_id, page);
@@ -117,6 +131,9 @@ CREATE INDEX IF NOT EXISTS idx_search_term ON search_terms(term);
 CREATE INDEX IF NOT EXISTS idx_search_document ON search_terms(document_id);
 CREATE INDEX IF NOT EXISTS idx_vectors_document ON vectors(document_id);
 CREATE INDEX IF NOT EXISTS idx_images_document ON images(document_id);
+CREATE INDEX IF NOT EXISTS idx_tags_key_value ON document_tags(tag_key, tag_value);
+CREATE INDEX IF NOT EXISTS idx_documents_source ON documents(source);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_source_external ON documents(source, external_id) WHERE external_id != '';
 `
 
 // initSchema creates the database schema
