@@ -118,20 +118,20 @@ func (se *SemanticExtractor) ExtractContent() (*DocumentContent, error) {
 		pageWidth := page.Width()
 		pageHeight := page.Height()
 
-		// Extract text blocks
-		blocks, images, err := se.textExt.ExtractPageBlocks(pageNum)
+		// Extract paragraphs and images (paragraph-level granularity)
+		paragraphs, images, err := se.textExt.ExtractStructuredTextWithImages(pageNum)
 		if err != nil {
 			continue
 		}
 
-		// Process text blocks
-		for _, block := range blocks {
+		// Process paragraphs
+		for _, para := range paragraphs {
 			blockID++
-			cb := se.createContentBlock(blockID, block, pageNum, pageWidth, pageHeight)
+			cb := se.createContentBlockFromParagraph(blockID, para, pageNum, pageWidth, pageHeight)
 
 			// Update section tracking
 			if cb.Semantic.IsHeading {
-				currentSection = block.Text
+				currentSection = para.Text
 			} else {
 				cb.Semantic.Section = currentSection
 			}
@@ -191,6 +191,86 @@ func (se *SemanticExtractor) createContentBlock(id int, block TextBlock, pageNum
 			HeadingLevel: headingLevel,
 		},
 	}
+}
+
+// createContentBlockFromParagraph creates a ContentBlock from a Paragraph
+func (se *SemanticExtractor) createContentBlockFromParagraph(id int, para Paragraph, pageNum int, pageWidth, pageHeight float64) ContentBlock {
+	blockType := BlockTypeText
+	headingLevel := 0
+
+	if para.IsHeading {
+		blockType = BlockTypeHeading
+		headingLevel = se.detectHeadingLevelFromParagraph(para)
+	} else if se.detectListFromParagraph(para) {
+		blockType = BlockTypeList
+	}
+
+	return ContentBlock{
+		ID:      formatBlockID(id),
+		Type:    blockType,
+		Content: strings.TrimSpace(para.Text),
+		Page:    pageNum,
+		BBox: BoundingBox{
+			X:          para.MinX,
+			Y:          para.MinY,
+			Width:      para.Width,
+			Height:     para.Height,
+			PageWidth:  pageWidth,
+			PageHeight: pageHeight,
+		},
+		Font: &FontInfo{
+			Name:   para.FontName,
+			Size:   para.FontSize,
+			Bold:   isBoldFont(para.FontName),
+			Italic: isItalicFont(para.FontName),
+		},
+		Semantic: SemanticInfo{
+			IsHeading:    para.IsHeading,
+			HeadingLevel: headingLevel,
+		},
+	}
+}
+
+// detectHeadingLevelFromParagraph determines the heading level (1-6) from a Paragraph
+func (se *SemanticExtractor) detectHeadingLevelFromParagraph(para Paragraph) int {
+	switch {
+	case para.FontSize >= 24:
+		return 1
+	case para.FontSize >= 20:
+		return 2
+	case para.FontSize >= 16:
+		return 3
+	case para.FontSize >= 14:
+		return 4
+	case para.FontSize >= 12 && isBoldFont(para.FontName):
+		return 5
+	default:
+		return 6
+	}
+}
+
+// detectListFromParagraph determines if a paragraph is a list item
+func (se *SemanticExtractor) detectListFromParagraph(para Paragraph) bool {
+	text := strings.TrimSpace(para.Text)
+	if len(text) == 0 {
+		return false
+	}
+
+	// Bullet points
+	bulletPrefixes := []string{"•", "●", "○", "■", "□", "▪", "▫", "-", "*", "‣", "◦"}
+	for _, prefix := range bulletPrefixes {
+		if strings.HasPrefix(text, prefix) {
+			return true
+		}
+	}
+
+	// Numbered list (1. 2. 3. or (1) (2) (3) or a) b) c))
+	numberedPattern := regexp.MustCompile(`^(\d+[.)]\s|[(]\d+[)]\s|[a-z][.)]\s)`)
+	if numberedPattern.MatchString(text) {
+		return true
+	}
+
+	return false
 }
 
 // createImageBlock creates a ContentBlock for an image

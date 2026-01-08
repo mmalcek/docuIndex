@@ -351,6 +351,28 @@ func (te *TextExtractor) ExtractStructuredText(pageNum int) ([]Paragraph, error)
 	return te.blocksToParag(blocks), nil
 }
 
+// ExtractStructuredTextWithImages extracts paragraphs and images from a page
+func (te *TextExtractor) ExtractStructuredTextWithImages(pageNum int) ([]Paragraph, []ImageRef, error) {
+	te.spans = nil
+	te.images = nil
+
+	page, err := te.doc.GetPage(pageNum)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	interpreter := NewContentInterpreter(page, te)
+	if err := interpreter.Execute(); err != nil {
+		return nil, nil, err
+	}
+
+	// Convert spans to blocks, then blocks to paragraphs
+	blocks := te.spansToBlocks(pageNum)
+	paragraphs := te.blocksToParag(blocks)
+
+	return paragraphs, te.images, nil
+}
+
 // Paragraph represents a paragraph of text
 type Paragraph struct {
 	Text      string
@@ -360,7 +382,13 @@ type Paragraph struct {
 	Width     float64
 	Height    float64
 	FontSize  float64
+	FontName  string
 	IsHeading bool
+	// Bounding box fields for precise positioning
+	MinX float64
+	MaxX float64
+	MinY float64 // Bottom of paragraph (lowest Y)
+	MaxY float64 // Top of paragraph (highest Y)
 }
 
 // blocksToParag groups text blocks into paragraphs
@@ -389,6 +417,9 @@ func (te *TextExtractor) blocksToParag(blocks []TextBlock) []Paragraph {
 			// Start new paragraph
 			if currentPara != nil {
 				currentPara.Text = strings.Join(currentPara.Lines, " ")
+				// Calculate final width and height from bounding box
+				currentPara.Width = currentPara.MaxX - currentPara.MinX
+				currentPara.Height = currentPara.MaxY - currentPara.MinY
 				paragraphs = append(paragraphs, *currentPara)
 			}
 
@@ -399,11 +430,31 @@ func (te *TextExtractor) blocksToParag(blocks []TextBlock) []Paragraph {
 				X:         block.X,
 				Y:         block.Y,
 				FontSize:  block.FontSize,
+				FontName:  block.FontName,
 				IsHeading: isHeading,
+				// Initialize bounding box from first block
+				MinX: block.X,
+				MaxX: block.X + block.Width,
+				MinY: block.Y,
+				MaxY: block.Y + block.Height,
 			}
 		} else {
-			// Continue paragraph
+			// Continue paragraph - add line and update bounding box
 			currentPara.Lines = append(currentPara.Lines, text)
+
+			// Update bounding box to encompass this block
+			if block.X < currentPara.MinX {
+				currentPara.MinX = block.X
+			}
+			if block.X+block.Width > currentPara.MaxX {
+				currentPara.MaxX = block.X + block.Width
+			}
+			if block.Y < currentPara.MinY {
+				currentPara.MinY = block.Y
+			}
+			if block.Y+block.Height > currentPara.MaxY {
+				currentPara.MaxY = block.Y + block.Height
+			}
 		}
 
 		lastY = block.Y
@@ -413,6 +464,9 @@ func (te *TextExtractor) blocksToParag(blocks []TextBlock) []Paragraph {
 	// Don't forget the last paragraph
 	if currentPara != nil {
 		currentPara.Text = strings.Join(currentPara.Lines, " ")
+		// Calculate final width and height from bounding box
+		currentPara.Width = currentPara.MaxX - currentPara.MinX
+		currentPara.Height = currentPara.MaxY - currentPara.MinY
 		paragraphs = append(paragraphs, *currentPara)
 	}
 
