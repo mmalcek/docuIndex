@@ -6,14 +6,15 @@ import (
 	"time"
 )
 
-const currentSchemaVersion = 3
+const currentSchemaVersion = 4
 
 // Schema SQL statements
 const schemaSQL = `
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY,
-    applied_at TEXT NOT NULL
+    applied_at TEXT NOT NULL,
+    library_version TEXT DEFAULT ''
 );
 
 -- Documents table
@@ -141,7 +142,7 @@ CREATE INDEX IF NOT EXISTS idx_documents_content_hash ON documents(content_hash)
 `
 
 // initSchema creates the database schema
-func initSchema(db *sql.DB) error {
+func initSchema(db *sql.DB, libraryVersion string) error {
 	// Enable foreign keys
 	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		return fmt.Errorf("enable foreign keys: %w", err)
@@ -165,12 +166,12 @@ func initSchema(db *sql.DB) error {
 		}
 
 		// Record schema version
-		if err := setSchemaVersion(db, currentSchemaVersion); err != nil {
+		if err := setSchemaVersion(db, currentSchemaVersion, libraryVersion); err != nil {
 			return err
 		}
 	} else if version < currentSchemaVersion {
 		// Run migrations
-		if err := runMigrations(db, version); err != nil {
+		if err := runMigrations(db, version, libraryVersion); err != nil {
 			return err
 		}
 	}
@@ -207,11 +208,52 @@ func getSchemaVersion(db *sql.DB) (int, error) {
 	return version, nil
 }
 
-// setSchemaVersion records a schema version
-func setSchemaVersion(db *sql.DB, version int) error {
+// DatabaseInfo contains information about the database schema
+type DatabaseInfo struct {
+	SchemaVersion  int
+	LibraryVersion string
+	CreatedAt      time.Time
+	LastMigration  time.Time
+}
+
+// GetDatabaseInfo returns information about the database schema and version
+func (s *Store) GetDatabaseInfo() (*DatabaseInfo, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	info := &DatabaseInfo{}
+
+	// Get current schema version and library version from most recent migration
+	err := s.db.QueryRow(`
+		SELECT version, applied_at, COALESCE(library_version, '')
+		FROM schema_version
+		ORDER BY version DESC
+		LIMIT 1
+	`).Scan(&info.SchemaVersion, &info.LastMigration, &info.LibraryVersion)
+	if err != nil {
+		return nil, fmt.Errorf("get schema version: %w", err)
+	}
+
+	// Get creation time from first schema version entry
+	err = s.db.QueryRow(`
+		SELECT applied_at
+		FROM schema_version
+		ORDER BY version ASC
+		LIMIT 1
+	`).Scan(&info.CreatedAt)
+	if err != nil {
+		// If we can't get creation time, use last migration time
+		info.CreatedAt = info.LastMigration
+	}
+
+	return info, nil
+}
+
+// setSchemaVersion records a schema version with library version
+func setSchemaVersion(db *sql.DB, version int, libraryVersion string) error {
 	_, err := db.Exec(`
-		INSERT INTO schema_version (version, applied_at) VALUES (?, ?)
-	`, version, time.Now().UTC().Format(time.RFC3339))
+		INSERT INTO schema_version (version, applied_at, library_version) VALUES (?, ?, ?)
+	`, version, time.Now().UTC().Format(time.RFC3339), libraryVersion)
 
 	if err != nil {
 		return fmt.Errorf("set schema version: %w", err)
@@ -221,11 +263,12 @@ func setSchemaVersion(db *sql.DB, version int) error {
 }
 
 // runMigrations runs schema migrations from oldVersion to currentSchemaVersion
-func runMigrations(db *sql.DB, oldVersion int) error {
+func runMigrations(db *sql.DB, oldVersion int, libraryVersion string) error {
 	// Migration functions by version
 	migrations := map[int]func(*sql.DB) error{
 		2: migrateV1ToV2,
 		3: migrateV2ToV3,
+		4: migrateV3ToV4,
 	}
 
 	for v := oldVersion + 1; v <= currentSchemaVersion; v++ {
@@ -235,7 +278,7 @@ func runMigrations(db *sql.DB, oldVersion int) error {
 			}
 		}
 
-		if err := setSchemaVersion(db, v); err != nil {
+		if err := setSchemaVersion(db, v, libraryVersion); err != nil {
 			return err
 		}
 	}
@@ -272,6 +315,17 @@ func migrateV2ToV3(db *sql.DB) error {
 	_, err := db.Exec(`ALTER TABLE images ADD COLUMN description TEXT DEFAULT ''`)
 	if err != nil {
 		return fmt.Errorf("add description column to images: %w", err)
+	}
+
+	return nil
+}
+
+// migrateV3ToV4 adds library_version column to schema_version table
+func migrateV3ToV4(db *sql.DB) error {
+	// Add library_version column to schema_version table
+	_, err := db.Exec(`ALTER TABLE schema_version ADD COLUMN library_version TEXT DEFAULT ''`)
+	if err != nil {
+		return fmt.Errorf("add library_version column to schema_version: %w", err)
 	}
 
 	return nil

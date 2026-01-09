@@ -10,6 +10,7 @@ docuindex/
 ├── CHECKLIST.md        # Implementation progress tracking
 ├── go.mod              # Go module (github.com/mmalcek/docuIndex)
 ├── docuindex.go        # Main API entry point
+├── version.go          # Library version constant
 ├── types.go            # Core types (ContentBlock, Document, etc.)
 ├── errors.go           # Custom error types
 ├── options.go          # Configuration options
@@ -226,6 +227,7 @@ CREATE TABLE document_tags (
 | `Filter` | Fluent filter DSL for advanced metadata filtering |
 | `TokenBudget` | Helper for tracking token usage across operations |
 | `TokenCredential` | Interface for Azure token-based auth (compatible with azcore.TokenCredential) |
+| `DatabaseInfo` | Database schema info (SchemaVersion, LibraryVersion, CreatedAt, LastMigration) |
 | `AccessToken` | Azure access token with expiry time |
 
 ## Public API
@@ -348,6 +350,13 @@ status, err := store.GetEmbeddingStatus(docID)  // Detailed status
 // status.Dimension       - vector dimension
 // status.LastUpdated     - when embeddings were last updated
 // status.Progress()      - returns completion percentage (0-100)
+
+// Get database version info (useful for debugging production issues)
+dbInfo, err := store.DatabaseInfo()
+// dbInfo.SchemaVersion  - current schema version (e.g., 4)
+// dbInfo.LibraryVersion - library version that created/migrated DB (e.g., "0.1.0")
+// dbInfo.CreatedAt      - when database was created
+// dbInfo.LastMigration  - when last migration was applied
 
 // === AI/Agent Integration Features ===
 
@@ -645,6 +654,8 @@ go run main.go detect-intent "summarize this"  # Detect query intent type
 | Add dedup support | `sqlite/dedup.go` CheckDuplicateByChecksum() |
 | Modify stop words | `internal/nlp/stopwords.go` IsStopWord() |
 | Modify stemming | `internal/nlp/stemmer.go` Stem() |
+| Get database info | `docuindex.go` DatabaseInfo() |
+| Bump library version | `version.go` Version constant |
 
 ## Dependencies
 

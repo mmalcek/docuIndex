@@ -368,3 +368,11 @@ func (e *EmbeddingStatus) Progress() float64 {
 	}
 	return float64(e.EmbeddedCount) / float64(e.TotalEmbeddable) * 100.0
 }
+
+// DatabaseInfo contains information about the database schema and version
+type DatabaseInfo struct {
+	SchemaVersion  int       `json:"schema_version"`  // Current schema version
+	LibraryVersion string    `json:"library_version"` // Library version that created/migrated DB
+	CreatedAt      time.Time `json:"created_at"`      // When database was created
+	LastMigration  time.Time `json:"last_migration"`  // When last migration was applied
+}

@@ -428,6 +428,24 @@ if status.IsComplete {
 // - LastUpdated     time.Time - when embeddings were last updated
 ```
 
+### Database Info
+
+Get information about the database schema and library version (useful for debugging):
+
+```go
+info, err := store.DatabaseInfo()
+fmt.Printf("Schema version: %d\n", info.SchemaVersion)
+fmt.Printf("Library version: %s\n", info.LibraryVersion)
+fmt.Printf("Created: %s\n", info.CreatedAt)
+fmt.Printf("Last migration: %s\n", info.LastMigration)
+
+// DatabaseInfo fields:
+// - SchemaVersion  int       - current database schema version
+// - LibraryVersion string    - library version that created/migrated the DB
+// - CreatedAt      time.Time - when database was first created
+// - LastMigration  time.Time - when last schema migration was applied
+```
+
 ## Storage Architecture
 
 DocuIndex uses a unified SQLite database for all metadata and search indices:

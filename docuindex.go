@@ -47,7 +47,7 @@ func NewStore(basePath string, opts ...StoreOption) (*Store, error) {
 	}
 
 	// Create SQLite store
-	db, err := sqlite.NewStore(basePath,
+	db, err := sqlite.NewStore(basePath, Version,
 		sqlite.WithImageExtraction(config.ExtractImages),
 		sqlite.WithSemanticAnalysis(config.ExtractSemantics),
 		sqlite.WithChecksum(config.ComputeChecksum),
@@ -2143,6 +2143,24 @@ type StoreStats struct {
 	IndexTerms    int   `json:"index_terms"`
 	VectorCount   int   `json:"vector_count"`
 	StorageBytes  int64 `json:"storage_bytes"`
+}
+
+// DatabaseInfo returns information about the database schema and version
+func (s *Store) DatabaseInfo() (*DatabaseInfo, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	info, err := s.db.GetDatabaseInfo()
+	if err != nil {
+		return nil, err
+	}
+
+	return &DatabaseInfo{
+		SchemaVersion:  info.SchemaVersion,
+		LibraryVersion: info.LibraryVersion,
+		CreatedAt:      info.CreatedAt,
+		LastMigration:  info.LastMigration,
+	}, nil
 }
 
 // Helper functions

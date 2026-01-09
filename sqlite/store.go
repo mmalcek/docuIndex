@@ -80,7 +80,7 @@ func WithStopWords(enabled bool) Option {
 }
 
 // NewStore creates a new SQLite-backed document store
-func NewStore(dataDir string, opts ...Option) (*Store, error) {
+func NewStore(dataDir string, libraryVersion string, opts ...Option) (*Store, error) {
 	// Apply options
 	config := DefaultStoreConfig()
 	for _, opt := range opts {
@@ -112,7 +112,7 @@ func NewStore(dataDir string, opts ...Option) (*Store, error) {
 	}
 
 	// Initialize schema
-	if err := initSchema(db); err != nil {
+	if err := initSchema(db, libraryVersion); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
