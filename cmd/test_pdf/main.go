@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/mariomalcek/docuIndex/pdf"
+	"github.com/mmalcek/docuIndex/pdf"
 )
 
 func main() {

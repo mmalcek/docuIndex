@@ -1,8 +1,8 @@
-module github.com/mariomalcek/docuIndex/testApp
+module github.com/mmalcek/docuIndex/testApp
 
 go 1.24.0
 
-require github.com/mariomalcek/docuIndex v0.0.0
+require github.com/mmalcek/docuIndex v0.0.0
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
@@ -18,4 +18,4 @@ require (
 	modernc.org/sqlite v1.42.2 // indirect
 )
 
-replace github.com/mariomalcek/docuIndex => ../
+replace github.com/mmalcek/docuIndex => ../

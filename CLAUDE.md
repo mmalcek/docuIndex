@@ -8,7 +8,7 @@ Pure Go package for parsing PDF and DOCX files into AI-searchable format with un
 docuindex/
 ├── CLAUDE.md           # This file - project docs for AI
 ├── CHECKLIST.md        # Implementation progress tracking
-├── go.mod              # Go module (github.com/mariomalcek/docuIndex)
+├── go.mod              # Go module (github.com/mmalcek/docuIndex)
 ├── docuindex.go        # Main API entry point
 ├── types.go            # Core types (ContentBlock, Document, etc.)
 ├── errors.go           # Custom error types

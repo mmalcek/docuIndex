@@ -12,12 +12,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/mariomalcek/docuIndex/docx"
-	"github.com/mariomalcek/docuIndex/embedding"
-	"github.com/mariomalcek/docuIndex/pdf"
-	hsearch "github.com/mariomalcek/docuIndex/search"
-	"github.com/mariomalcek/docuIndex/sqlite"
-	"github.com/mariomalcek/docuIndex/vectorindex"
+	"github.com/mmalcek/docuIndex/docx"
+	"github.com/mmalcek/docuIndex/embedding"
+	"github.com/mmalcek/docuIndex/pdf"
+	hsearch "github.com/mmalcek/docuIndex/search"
+	"github.com/mmalcek/docuIndex/sqlite"
+	"github.com/mmalcek/docuIndex/vectorindex"
 )
 
 // Store manages document storage, indexing, and search with unified SQLite backend

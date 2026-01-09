@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mariomalcek/docuIndex/pdf/encoding"
+	"github.com/mmalcek/docuIndex/pdf/encoding"
 )
 
 // Font represents a PDF font and handles character to Unicode mapping

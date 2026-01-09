@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/mariomalcek/docuIndex/internal/nlp"
+	"github.com/mmalcek/docuIndex/internal/nlp"
 )
 
 // BlockType represents the type of content block (local to pdf package)

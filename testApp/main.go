@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	docuindex "github.com/mariomalcek/docuIndex"
-	"github.com/mariomalcek/docuIndex/embedding"
+	docuindex "github.com/mmalcek/docuIndex"
+	"github.com/mmalcek/docuIndex/embedding"
 )
 
 const (
