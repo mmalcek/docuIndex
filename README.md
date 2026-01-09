@@ -89,7 +89,7 @@ store, err := docuindex.NewStore("./data",
 ```go
 import "github.com/mmalcek/docuIndex/embedding"
 
-// Azure OpenAI (defaults to API version 2024-10-21)
+// Azure OpenAI with API key (defaults to API version 2024-10-21)
 provider, err := embedding.NewProvider(embedding.Config{
     Provider:   "azure",
     Endpoint:   os.Getenv("AZURE_ENDPOINT"),
@@ -98,6 +98,19 @@ provider, err := embedding.NewProvider(embedding.Config{
     // APIVersion: "v1",           // Optional: use new v1 API format
     // APIVersion: "2024-10-21",   // Optional: explicit version (default)
 })
+
+// Azure OpenAI with Azure Identity (Managed Identity, DefaultAzureCredential, etc.)
+// Optional: requires github.com/Azure/azure-sdk-for-go/sdk/azidentity
+import "github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+
+cred, err := azidentity.NewDefaultAzureCredential(nil)
+provider, err := embedding.NewProvider(embedding.Config{
+    Provider:        "azure",
+    Endpoint:        os.Getenv("AZURE_ENDPOINT"),
+    Model:           "text-embedding-3-small",
+    TokenCredential: cred,  // Uses Bearer token instead of api-key header
+})
+// Tokens are cached and automatically refreshed before expiry
 
 // OpenAI
 provider, err := embedding.NewProvider(embedding.Config{

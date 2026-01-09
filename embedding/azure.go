@@ -8,16 +8,24 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 )
 
 // azureProvider implements embedding using Azure OpenAI or Azure AI
 type azureProvider struct {
 	baseProvider
-	client     *http.Client
-	endpoint   string
-	apiKey     string
-	model      string
-	apiVersion string
+	client          *http.Client
+	endpoint        string
+	apiKey          string
+	tokenCredential TokenCredential
+	model           string
+	apiVersion      string
+
+	// Token cache for token-based auth
+	tokenMu     sync.RWMutex
+	cachedToken string
+	tokenExpiry time.Time
 }
 
 // Azure OpenAI embedding request
@@ -52,8 +60,8 @@ func newAzureProvider(cfg Config) (*azureProvider, error) {
 	if cfg.Endpoint == "" {
 		return nil, fmt.Errorf("azure endpoint is required")
 	}
-	if cfg.APIKey == "" {
-		return nil, fmt.Errorf("azure API key is required")
+	if cfg.APIKey == "" && cfg.TokenCredential == nil {
+		return nil, fmt.Errorf("azure API key or token credential is required")
 	}
 
 	apiVersion := cfg.APIVersion
@@ -66,11 +74,12 @@ func newAzureProvider(cfg Config) (*azureProvider, error) {
 			config:    cfg,
 			dimension: cfg.Dimension,
 		},
-		client:     &http.Client{Timeout: cfg.Timeout},
-		endpoint:   strings.TrimSuffix(cfg.Endpoint, "/"),
-		apiKey:     cfg.APIKey,
-		model:      cfg.Model,
-		apiVersion: apiVersion,
+		client:          &http.Client{Timeout: cfg.Timeout},
+		endpoint:        strings.TrimSuffix(cfg.Endpoint, "/"),
+		apiKey:          cfg.APIKey,
+		tokenCredential: cfg.TokenCredential,
+		model:           cfg.Model,
+		apiVersion:      apiVersion,
 	}
 
 	return p, nil
@@ -115,6 +124,43 @@ func (p *azureProvider) EmbedSingle(ctx context.Context, text string) ([]float32
 	return p.baseProvider.embedSingle(ctx, text, p.Embed)
 }
 
+// getToken returns a valid access token, refreshing if necessary
+func (p *azureProvider) getToken(ctx context.Context) (string, error) {
+	if p.tokenCredential == nil {
+		return "", fmt.Errorf("token credential not configured")
+	}
+
+	// Check if we have a valid cached token (with 5 min buffer)
+	p.tokenMu.RLock()
+	if p.cachedToken != "" && time.Now().Add(5*time.Minute).Before(p.tokenExpiry) {
+		token := p.cachedToken
+		p.tokenMu.RUnlock()
+		return token, nil
+	}
+	p.tokenMu.RUnlock()
+
+	// Need to refresh token
+	p.tokenMu.Lock()
+	defer p.tokenMu.Unlock()
+
+	// Double-check after acquiring write lock
+	if p.cachedToken != "" && time.Now().Add(5*time.Minute).Before(p.tokenExpiry) {
+		return p.cachedToken, nil
+	}
+
+	// Get new token - Azure Cognitive Services scope
+	accessToken, err := p.tokenCredential.GetToken(ctx, TokenRequestOptions{
+		Scopes: []string{"https://cognitiveservices.azure.com/.default"},
+	})
+	if err != nil {
+		return "", fmt.Errorf("get token: %w", err)
+	}
+
+	p.cachedToken = accessToken.Token
+	p.tokenExpiry = accessToken.ExpiresOn
+	return p.cachedToken, nil
+}
+
 func (p *azureProvider) doRequest(ctx context.Context, texts []string) ([][]float32, error) {
 	// Build request body
 	reqBody := azureEmbeddingRequest{
@@ -151,7 +197,17 @@ func (p *azureProvider) doRequest(ctx context.Context, texts []string) ([][]floa
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("api-key", p.apiKey)
+
+	// Use token credential if available, otherwise API key
+	if p.tokenCredential != nil {
+		token, err := p.getToken(ctx)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+	} else {
+		req.Header.Set("api-key", p.apiKey)
+	}
 
 	resp, err := p.client.Do(req)
 	if err != nil {

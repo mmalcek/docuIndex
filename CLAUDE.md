@@ -222,6 +222,8 @@ CREATE TABLE document_tags (
 | `Chunk` | A chunked content piece with token count and position |
 | `Filter` | Fluent filter DSL for advanced metadata filtering |
 | `TokenBudget` | Helper for tracking token usage across operations |
+| `TokenCredential` | Interface for Azure token-based auth (compatible with azcore.TokenCredential) |
+| `AccessToken` | Azure access token with expiry time |
 
 ## Public API
 
@@ -425,7 +427,7 @@ docuindex.WithProgressCallback(fn)     // Receive indexing progress updates
 
 ### Embedding Providers
 ```go
-// Azure OpenAI (uses latest stable API version 2024-10-21 by default)
+// Azure OpenAI with API key (uses latest stable API version 2024-10-21 by default)
 provider, _ := embedding.NewProvider(embedding.Config{
     Provider: "azure",
     Endpoint: os.Getenv("AZURE_ENDPOINT"),
@@ -434,6 +436,20 @@ provider, _ := embedding.NewProvider(embedding.Config{
     // APIVersion: "v1",              // Optional: use new v1 API format
     // APIVersion: "2024-10-21",      // Optional: explicit version (default)
 })
+
+// Azure OpenAI with Azure Identity (Managed Identity, DefaultAzureCredential, etc.)
+// Requires: go get github.com/Azure/azure-sdk-for-go/sdk/azidentity
+import "github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+
+cred, _ := azidentity.NewDefaultAzureCredential(nil)
+provider, _ := embedding.NewProvider(embedding.Config{
+    Provider:        "azure",
+    Endpoint:        os.Getenv("AZURE_ENDPOINT"),
+    Model:           "text-embedding-3-small",
+    TokenCredential: cred,  // Uses Bearer token instead of api-key header
+})
+// Note: TokenCredential interface is compatible with Azure SDK's azcore.TokenCredential
+// Tokens are cached and automatically refreshed 5 minutes before expiry
 
 // OpenAI
 provider, _ := embedding.NewProvider(embedding.Config{

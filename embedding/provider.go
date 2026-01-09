@@ -35,6 +35,23 @@ type Provider interface {
 	MaxBatchSize() int
 }
 
+// TokenCredential interface for Azure token-based authentication
+// Compatible with github.com/Azure/azure-sdk-for-go/sdk/azcore.TokenCredential
+type TokenCredential interface {
+	GetToken(ctx context.Context, options TokenRequestOptions) (AccessToken, error)
+}
+
+// TokenRequestOptions for token requests
+type TokenRequestOptions struct {
+	Scopes []string
+}
+
+// AccessToken represents an Azure access token
+type AccessToken struct {
+	Token     string
+	ExpiresOn time.Time
+}
+
 // Config holds configuration for an embedding provider
 type Config struct {
 	// Provider type: "azure", "openai", "ollama"
@@ -46,8 +63,12 @@ type Config struct {
 	// API endpoint (required for Azure and Ollama)
 	Endpoint string
 
-	// API key (not required for Ollama)
+	// API key (not required for Ollama, optional for Azure if TokenCredential is provided)
 	APIKey string
+
+	// TokenCredential for Azure token-based authentication (alternative to APIKey)
+	// If provided, uses Bearer token authentication instead of api-key header
+	TokenCredential TokenCredential
 
 	// Vector dimension (auto-detected if 0)
 	Dimension int
