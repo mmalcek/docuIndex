@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3
 
 // Schema SQL statements
 const schemaSQL = `
@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS images (
     height INTEGER,
     page INTEGER,
     original_name TEXT,
+    description TEXT DEFAULT '',
     FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
 );
 
@@ -224,6 +225,7 @@ func runMigrations(db *sql.DB, oldVersion int) error {
 	// Migration functions by version
 	migrations := map[int]func(*sql.DB) error{
 		2: migrateV1ToV2,
+		3: migrateV2ToV3,
 	}
 
 	for v := oldVersion + 1; v <= currentSchemaVersion; v++ {
@@ -259,6 +261,17 @@ func migrateV1ToV2(db *sql.DB) error {
 	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_documents_checksum ON documents(checksum) WHERE checksum != ''`)
 	if err != nil {
 		return fmt.Errorf("create checksum index: %w", err)
+	}
+
+	return nil
+}
+
+// migrateV2ToV3 adds description column to images table for AI-friendly alt text
+func migrateV2ToV3(db *sql.DB) error {
+	// Add description column to images table
+	_, err := db.Exec(`ALTER TABLE images ADD COLUMN description TEXT DEFAULT ''`)
+	if err != nil {
+		return fmt.Errorf("add description column to images: %w", err)
 	}
 
 	return nil

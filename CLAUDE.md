@@ -181,7 +181,8 @@ CREATE TABLE images (
     width INTEGER,
     height INTEGER,
     page INTEGER,
-    original_name TEXT
+    original_name TEXT,
+    description TEXT DEFAULT ''  -- AI-friendly alt text/description
 );
 
 -- Document tags for filtering
@@ -209,8 +210,10 @@ CREATE TABLE document_tags (
 | `FontInfo` | Font name, size, bold, italic flags |
 | `ContextResult` | Before/Center/After blocks for RAG |
 | `SearchMode` | Search type: keyword, semantic, or hybrid |
-| `CustomData` | Structured data source with entries, tags, ImportedAt, and ExternalID for upsert |
-| `DataEntry` | Single entry in custom data with content and metadata |
+| `CustomData` | Structured data source with entries, tags, images, ImportedAt, and ExternalID for upsert |
+| `DataEntry` | Single entry in custom data with content, metadata, and images |
+| `CustomImage` | Image data for CustomData (Data, Format, Width, Height, OriginalName, Description) |
+| `ImageInfo` | Image metadata from storage (ID, DocumentID, BlockID, Format, Width, Height, Page, OriginalName, Description) |
 | `EmbeddingStatus` | Document embedding state (HasEmbeddings, IsComplete, EmbeddedCount, TotalEmbeddable, Model, Dimension, LastUpdated) |
 | `IndexProgress` | Progress tracking for async document indexing (status, pages, blocks, elapsed time) |
 | `ProgressCallback` | Function type for receiving indexing progress updates |
@@ -248,6 +251,29 @@ doc, err := store.IndexCustomData(&docuindex.CustomData{
     Entries: []docuindex.DataEntry{
         {Content: "Meeting with Acme Corp..."},
         {Content: "Follow-up call scheduled..."},
+    },
+})
+
+// Index custom data with images (entry-level and document-level)
+doc, err := store.IndexCustomData(&docuindex.CustomData{
+    Source: "products",
+    Name:   "Product Catalog",
+    Entries: []docuindex.DataEntry{
+        {
+            ID:      "laptop-001",
+            Content: "MacBook Pro 16-inch with M3 chip",
+            Images: []docuindex.CustomImage{
+                {
+                    Data:        jpegBytes,
+                    Format:      "jpeg",
+                    Description: "Front view of MacBook Pro",
+                },
+            },
+        },
+    },
+    // Document-level images (not tied to specific entry)
+    Images: []docuindex.CustomImage{
+        {Data: logoPng, Format: "png", Description: "Company logo"},
     },
 })
 
@@ -607,6 +633,8 @@ go run main.go detect-intent "summarize this"  # Detect query intent type
 | Check embedding status | `docuindex.go` GetEmbeddingStatus(), HasEmbeddings() |
 | Query images by section/page | `sqlite/images.go` GetImagesBySection(), GetImagesByPage() |
 | Include images in search | `docuindex.go` Search() with WithImages(true) |
+| Add images to CustomData | `docuindex.go` IndexCustomData() with Images field |
+| Get image description | `sqlite/images.go` GetImageInfo() returns Description |
 | Index with progress | `docuindex.go` IndexDocumentWithProgress() |
 | Check for duplicates | `docuindex.go` CheckDuplicate(), CheckDuplicateByContent() |
 | Agent-friendly search | `docuindex.go` SearchForAgent() |

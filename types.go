@@ -325,6 +325,7 @@ type DataEntry struct {
 	Content  string            `json:"content"`            // Text content to index/embed
 	Type     string            `json:"type,omitempty"`     // "text" (default), "json", "code"
 	Metadata map[string]string `json:"metadata,omitempty"` // Entry-specific metadata
+	Images   []CustomImage     `json:"images,omitempty"`   // Images associated with this entry
 }
 
 // CustomData represents structured data to be indexed
@@ -336,6 +337,17 @@ type CustomData struct {
 	Entries     []DataEntry       `json:"entries"`               // Data entries to index
 	ImportedAt  time.Time         `json:"imported_at,omitempty"` // When data was imported (for incremental updates)
 	ExternalID  string            `json:"external_id,omitempty"` // Unique ID from source system (for upsert)
+	Images      []CustomImage     `json:"images,omitempty"`      // Document-level images (not tied to specific entry)
+}
+
+// CustomImage represents an image to be indexed with custom data
+type CustomImage struct {
+	Data         []byte `json:"-"`                       // Image bytes (required, excluded from JSON)
+	Format       string `json:"format"`                  // "png", "jpeg", "gif", "bmp" (required)
+	Width        int    `json:"width,omitempty"`         // Optional, auto-detected if not provided
+	Height       int    `json:"height,omitempty"`        // Optional, auto-detected if not provided
+	OriginalName string `json:"original_name,omitempty"` // Optional display name
+	Description  string `json:"description,omitempty"`   // AI-friendly alt text/description
 }
 
 // EmbeddingStatus contains information about a document's embedding state

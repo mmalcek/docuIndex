@@ -1,15 +1,22 @@
 package docuindex
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"image"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	// Image format decoders for detectImageDimensions
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 
 	"github.com/google/uuid"
 	"github.com/mmalcek/docuIndex/docx"
@@ -99,13 +106,46 @@ func (s *Store) SetEmbeddingProvider(provider embedding.Provider) error {
 
 // pendingImage holds image data to be saved after document creation
 type pendingImage struct {
-	Data       []byte
-	Format     string
-	Width      int
-	Height     int
-	Page       int
-	Name       string
-	BlockIndex int // Index in content.Blocks to update
+	Data        []byte
+	Format      string
+	Width       int
+	Height      int
+	Page        int
+	Name        string
+	BlockIndex  int    // Index in content.Blocks to update
+	BlockID     string // Parent entry block ID (for CustomData images)
+	Description string // AI-friendly description (for CustomData images)
+}
+
+// isValidImageFormat checks if format is supported
+func isValidImageFormat(format string) bool {
+	switch strings.ToLower(format) {
+	case "png", "jpeg", "jpg", "gif", "bmp", "tiff", "tif":
+		return true
+	default:
+		return false
+	}
+}
+
+// detectImageDimensions extracts width/height from image data
+func detectImageDimensions(data []byte) (int, int, error) {
+	config, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return 0, 0, err
+	}
+	return config.Width, config.Height, nil
+}
+
+// normalizeImageFormat normalizes image format strings (e.g., "jpg" -> "jpeg")
+func normalizeImageFormat(format string) string {
+	format = strings.ToLower(format)
+	if format == "jpg" {
+		return "jpeg"
+	}
+	if format == "tif" {
+		return "tiff"
+	}
+	return format
 }
 
 // IndexDocument indexes a document from a file path
@@ -147,11 +187,11 @@ func (s *Store) IndexDocument(path string, opts ...IndexOption) (*Document, erro
 	// Now save images (after document exists in DB)
 	for _, img := range pendingImages {
 		// Get block ID if we have a matching content block
-		blockID := ""
-		if img.BlockIndex >= 0 && img.BlockIndex < len(doc.Content.Blocks) {
+		blockID := img.BlockID
+		if blockID == "" && img.BlockIndex >= 0 && img.BlockIndex < len(doc.Content.Blocks) {
 			blockID = doc.Content.Blocks[img.BlockIndex].ID
 		}
-		imageID, err := s.db.SaveImage(doc.Info.ID, img.Data, img.Format, img.Width, img.Height, img.Page, img.Name, blockID)
+		imageID, err := s.db.SaveImage(doc.Info.ID, img.Data, img.Format, img.Width, img.Height, img.Page, img.Name, blockID, img.Description)
 		if err != nil {
 			continue // Skip failed images
 		}
@@ -465,8 +505,9 @@ func (s *Store) IndexCustomData(data *CustomData, opts ...IndexOption) (*Documen
 		importedAt = now
 	}
 
-	// Convert entries to content blocks
-	blocks := make([]ContentBlock, len(data.Entries))
+	// Convert entries to content blocks and collect images
+	var blocks []ContentBlock
+	var pendingImages []pendingImage
 	var totalSize int
 
 	for i, entry := range data.Entries {
@@ -475,7 +516,8 @@ func (s *Store) IndexCustomData(data *CustomData, opts ...IndexOption) (*Documen
 			entryID = fmt.Sprintf("entry_%d", i+1)
 		}
 
-		blocks[i] = ContentBlock{
+		// Add entry content block
+		blocks = append(blocks, ContentBlock{
 			ID:      entryID,
 			Type:    BlockTypeCustom,
 			Content: entry.Content,
@@ -483,9 +525,101 @@ func (s *Store) IndexCustomData(data *CustomData, opts ...IndexOption) (*Documen
 			Semantic: SemanticInfo{
 				Section: data.Source, // Use source as section for grouping
 			},
-		}
+		})
 
 		totalSize += len(entry.Content)
+
+		// Process entry-level images
+		for j, img := range entry.Images {
+			if len(img.Data) == 0 || !isValidImageFormat(img.Format) {
+				continue
+			}
+
+			imgID := uuid.New().String()
+			format := normalizeImageFormat(img.Format)
+
+			// Auto-detect dimensions if not provided
+			width, height := img.Width, img.Height
+			if width == 0 || height == 0 {
+				if w, h, err := detectImageDimensions(img.Data); err == nil {
+					width, height = w, h
+				}
+			}
+
+			name := img.OriginalName
+			if name == "" {
+				name = fmt.Sprintf("image_%d.%s", j+1, format)
+			}
+
+			// Add image block
+			blocks = append(blocks, ContentBlock{
+				ID:   imgID,
+				Type: BlockTypeImage,
+				Page: 1,
+				Semantic: SemanticInfo{
+					Section: data.Source,
+				},
+			})
+
+			// Queue image for saving after document exists
+			pendingImages = append(pendingImages, pendingImage{
+				Data:        img.Data,
+				Format:      format,
+				Width:       width,
+				Height:      height,
+				Page:        1,
+				Name:        name,
+				BlockIndex:  len(blocks) - 1, // Index of the image block just added
+				BlockID:     entryID,         // Link to parent entry
+				Description: img.Description,
+			})
+		}
+	}
+
+	// Process document-level images
+	for j, img := range data.Images {
+		if len(img.Data) == 0 || !isValidImageFormat(img.Format) {
+			continue
+		}
+
+		imgID := uuid.New().String()
+		format := normalizeImageFormat(img.Format)
+
+		// Auto-detect dimensions if not provided
+		width, height := img.Width, img.Height
+		if width == 0 || height == 0 {
+			if w, h, err := detectImageDimensions(img.Data); err == nil {
+				width, height = w, h
+			}
+		}
+
+		name := img.OriginalName
+		if name == "" {
+			name = fmt.Sprintf("doc_image_%d.%s", j+1, format)
+		}
+
+		// Add image block
+		blocks = append(blocks, ContentBlock{
+			ID:   imgID,
+			Type: BlockTypeImage,
+			Page: 1,
+			Semantic: SemanticInfo{
+				Section: data.Source,
+			},
+		})
+
+		// Queue image for saving after document exists
+		pendingImages = append(pendingImages, pendingImage{
+			Data:        img.Data,
+			Format:      format,
+			Width:       width,
+			Height:      height,
+			Page:        1,
+			Name:        name,
+			BlockIndex:  len(blocks) - 1, // Index of the image block just added
+			BlockID:     "",              // No parent entry for document-level images
+			Description: img.Description,
+		})
 	}
 
 	name := data.Name
@@ -524,12 +658,33 @@ func (s *Store) IndexCustomData(data *CustomData, opts ...IndexOption) (*Documen
 		}
 	}
 
+	// Save images (after document exists in DB)
+	for _, img := range pendingImages {
+		blockID := img.BlockID
+		if blockID == "" && img.BlockIndex >= 0 && img.BlockIndex < len(doc.Content.Blocks) {
+			blockID = doc.Content.Blocks[img.BlockIndex].ID
+		}
+		imageID, err := s.db.SaveImage(doc.Info.ID, img.Data, img.Format, img.Width, img.Height, img.Page, img.Name, blockID, img.Description)
+		if err != nil {
+			fmt.Printf("warning: failed to save image %s: %v\n", img.Name, err)
+			continue
+		}
+		// Update content block reference
+		if img.BlockIndex >= 0 && img.BlockIndex < len(doc.Content.Blocks) {
+			doc.Content.Blocks[img.BlockIndex].Content = fmt.Sprintf("images/%s", imageID)
+		}
+	}
+
 	// Index for BM25 search
 	sqliteBlocks := toSQLiteBlocks(doc)
-	// Add entry metadata to blocks
-	for i, entry := range data.Entries {
-		if len(entry.Metadata) > 0 {
-			sqliteBlocks[i].EntryMetadata = entry.Metadata
+	// Add entry metadata to blocks (only for entry blocks, not image blocks)
+	entryIdx := 0
+	for i := range sqliteBlocks {
+		if sqliteBlocks[i].Type == string(BlockTypeCustom) && entryIdx < len(data.Entries) {
+			if len(data.Entries[entryIdx].Metadata) > 0 {
+				sqliteBlocks[i].EntryMetadata = data.Entries[entryIdx].Metadata
+			}
+			entryIdx++
 		}
 	}
 
@@ -598,6 +753,11 @@ func (s *Store) UpsertCustomData(data *CustomData, opts ...IndexOption) (*Docume
 		docID = existingDoc.ID
 		createdAt = existingDoc.CreatedAt // Preserve original creation time
 
+		// Delete existing images before re-indexing
+		if err := s.db.DeleteImagesForDocument(docID); err != nil {
+			return nil, fmt.Errorf("delete existing images: %w", err)
+		}
+
 		// Delete existing vectors from HNSW before re-indexing
 		if s.hnsw != nil {
 			vectors, _ := s.db.GetVectorsForDocument(docID)
@@ -611,8 +771,9 @@ func (s *Store) UpsertCustomData(data *CustomData, opts ...IndexOption) (*Docume
 		createdAt = now
 	}
 
-	// Convert entries to content blocks
-	blocks := make([]ContentBlock, len(data.Entries))
+	// Convert entries to content blocks and collect images
+	var blocks []ContentBlock
+	var pendingImages []pendingImage
 	var totalSize int
 
 	for i, entry := range data.Entries {
@@ -621,7 +782,8 @@ func (s *Store) UpsertCustomData(data *CustomData, opts ...IndexOption) (*Docume
 			entryID = fmt.Sprintf("entry_%d", i+1)
 		}
 
-		blocks[i] = ContentBlock{
+		// Add entry content block
+		blocks = append(blocks, ContentBlock{
 			ID:      entryID,
 			Type:    BlockTypeCustom,
 			Content: entry.Content,
@@ -629,9 +791,101 @@ func (s *Store) UpsertCustomData(data *CustomData, opts ...IndexOption) (*Docume
 			Semantic: SemanticInfo{
 				Section: data.Source, // Use source as section for grouping
 			},
-		}
+		})
 
 		totalSize += len(entry.Content)
+
+		// Process entry-level images
+		for j, img := range entry.Images {
+			if len(img.Data) == 0 || !isValidImageFormat(img.Format) {
+				continue
+			}
+
+			imgID := uuid.New().String()
+			format := normalizeImageFormat(img.Format)
+
+			// Auto-detect dimensions if not provided
+			width, height := img.Width, img.Height
+			if width == 0 || height == 0 {
+				if w, h, err := detectImageDimensions(img.Data); err == nil {
+					width, height = w, h
+				}
+			}
+
+			name := img.OriginalName
+			if name == "" {
+				name = fmt.Sprintf("image_%d.%s", j+1, format)
+			}
+
+			// Add image block
+			blocks = append(blocks, ContentBlock{
+				ID:   imgID,
+				Type: BlockTypeImage,
+				Page: 1,
+				Semantic: SemanticInfo{
+					Section: data.Source,
+				},
+			})
+
+			// Queue image for saving after document exists
+			pendingImages = append(pendingImages, pendingImage{
+				Data:        img.Data,
+				Format:      format,
+				Width:       width,
+				Height:      height,
+				Page:        1,
+				Name:        name,
+				BlockIndex:  len(blocks) - 1, // Index of the image block just added
+				BlockID:     entryID,         // Link to parent entry
+				Description: img.Description,
+			})
+		}
+	}
+
+	// Process document-level images
+	for j, img := range data.Images {
+		if len(img.Data) == 0 || !isValidImageFormat(img.Format) {
+			continue
+		}
+
+		imgID := uuid.New().String()
+		format := normalizeImageFormat(img.Format)
+
+		// Auto-detect dimensions if not provided
+		width, height := img.Width, img.Height
+		if width == 0 || height == 0 {
+			if w, h, err := detectImageDimensions(img.Data); err == nil {
+				width, height = w, h
+			}
+		}
+
+		name := img.OriginalName
+		if name == "" {
+			name = fmt.Sprintf("doc_image_%d.%s", j+1, format)
+		}
+
+		// Add image block
+		blocks = append(blocks, ContentBlock{
+			ID:   imgID,
+			Type: BlockTypeImage,
+			Page: 1,
+			Semantic: SemanticInfo{
+				Section: data.Source,
+			},
+		})
+
+		// Queue image for saving after document exists
+		pendingImages = append(pendingImages, pendingImage{
+			Data:        img.Data,
+			Format:      format,
+			Width:       width,
+			Height:      height,
+			Page:        1,
+			Name:        name,
+			BlockIndex:  len(blocks) - 1, // Index of the image block just added
+			BlockID:     "",              // No parent entry for document-level images
+			Description: img.Description,
+		})
 	}
 
 	name := data.Name
@@ -671,12 +925,33 @@ func (s *Store) UpsertCustomData(data *CustomData, opts ...IndexOption) (*Docume
 		}
 	}
 
+	// Save images (after document exists in DB)
+	for _, img := range pendingImages {
+		blockID := img.BlockID
+		if blockID == "" && img.BlockIndex >= 0 && img.BlockIndex < len(doc.Content.Blocks) {
+			blockID = doc.Content.Blocks[img.BlockIndex].ID
+		}
+		imageID, err := s.db.SaveImage(doc.Info.ID, img.Data, img.Format, img.Width, img.Height, img.Page, img.Name, blockID, img.Description)
+		if err != nil {
+			fmt.Printf("warning: failed to save image %s: %v\n", img.Name, err)
+			continue
+		}
+		// Update content block reference
+		if img.BlockIndex >= 0 && img.BlockIndex < len(doc.Content.Blocks) {
+			doc.Content.Blocks[img.BlockIndex].Content = fmt.Sprintf("images/%s", imageID)
+		}
+	}
+
 	// Index for BM25 search
 	sqliteBlocks := toSQLiteBlocks(doc)
-	// Add entry metadata to blocks
-	for i, entry := range data.Entries {
-		if len(entry.Metadata) > 0 {
-			sqliteBlocks[i].EntryMetadata = entry.Metadata
+	// Add entry metadata to blocks (only for entry blocks, not image blocks)
+	entryIdx := 0
+	for i := range sqliteBlocks {
+		if sqliteBlocks[i].Type == string(BlockTypeCustom) && entryIdx < len(data.Entries) {
+			if len(data.Entries[entryIdx].Metadata) > 0 {
+				sqliteBlocks[i].EntryMetadata = data.Entries[entryIdx].Metadata
+			}
+			entryIdx++
 		}
 	}
 
@@ -1350,11 +1625,11 @@ func (s *Store) IndexDocumentWithProgress(path string, callback ProgressCallback
 
 	// Save images
 	for _, img := range pendingImages {
-		blockID := ""
-		if img.BlockIndex >= 0 && img.BlockIndex < len(doc.Content.Blocks) {
+		blockID := img.BlockID
+		if blockID == "" && img.BlockIndex >= 0 && img.BlockIndex < len(doc.Content.Blocks) {
 			blockID = doc.Content.Blocks[img.BlockIndex].ID
 		}
-		imageID, err := s.db.SaveImage(doc.Info.ID, img.Data, img.Format, img.Width, img.Height, img.Page, img.Name, blockID)
+		imageID, err := s.db.SaveImage(doc.Info.ID, img.Data, img.Format, img.Width, img.Height, img.Page, img.Name, blockID, img.Description)
 		if err != nil {
 			continue
 		}

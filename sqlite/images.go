@@ -19,10 +19,11 @@ type ImageInfo struct {
 	Height       int
 	Page         int
 	OriginalName string
+	Description  string // AI-friendly alt text/description
 }
 
 // SaveImage saves an image file and its metadata
-func (s *Store) SaveImage(documentID string, data []byte, format string, width, height, page int, originalName, blockID string) (string, error) {
+func (s *Store) SaveImage(documentID string, data []byte, format string, width, height, page int, originalName, blockID, description string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -39,9 +40,9 @@ func (s *Store) SaveImage(documentID string, data []byte, format string, width, 
 
 	// Save metadata to database
 	_, err := s.db.Exec(`
-		INSERT INTO images (id, document_id, block_id, format, width, height, page, original_name)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, imageID, documentID, blockID, format, width, height, page, originalName)
+		INSERT INTO images (id, document_id, block_id, format, width, height, page, original_name, description)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, imageID, documentID, blockID, format, width, height, page, originalName, description)
 
 	if err != nil {
 		// Clean up file on database error
@@ -62,7 +63,7 @@ func (s *Store) GetImage(imageID string) ([]byte, *ImageInfo, error) {
 	var blockID sql.NullString
 
 	err := s.db.QueryRow(`
-		SELECT id, document_id, block_id, format, width, height, page, original_name
+		SELECT id, document_id, block_id, format, width, height, page, original_name, description
 		FROM images WHERE id = ?
 	`, imageID).Scan(
 		&info.ID,
@@ -73,6 +74,7 @@ func (s *Store) GetImage(imageID string) ([]byte, *ImageInfo, error) {
 		&info.Height,
 		&info.Page,
 		&info.OriginalName,
+		&info.Description,
 	)
 
 	if err == sql.ErrNoRows {
@@ -105,7 +107,7 @@ func (s *Store) GetImageInfo(imageID string) (*ImageInfo, error) {
 	var blockID sql.NullString
 
 	err := s.db.QueryRow(`
-		SELECT id, document_id, block_id, format, width, height, page, original_name
+		SELECT id, document_id, block_id, format, width, height, page, original_name, description
 		FROM images WHERE id = ?
 	`, imageID).Scan(
 		&info.ID,
@@ -116,6 +118,7 @@ func (s *Store) GetImageInfo(imageID string) (*ImageInfo, error) {
 		&info.Height,
 		&info.Page,
 		&info.OriginalName,
+		&info.Description,
 	)
 
 	if err == sql.ErrNoRows {
@@ -135,7 +138,7 @@ func (s *Store) GetImagesForDocument(documentID string) ([]ImageInfo, error) {
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(`
-		SELECT id, document_id, block_id, format, width, height, page, original_name
+		SELECT id, document_id, block_id, format, width, height, page, original_name, description
 		FROM images WHERE document_id = ?
 		ORDER BY page, id
 	`, documentID)
@@ -158,6 +161,7 @@ func (s *Store) GetImagesForDocument(documentID string) ([]ImageInfo, error) {
 			&info.Height,
 			&info.Page,
 			&info.OriginalName,
+			&info.Description,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan image: %w", err)
@@ -261,7 +265,7 @@ func (s *Store) GetImagesBySection(documentID, section string) ([]ImageInfo, err
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(`
-		SELECT i.id, i.document_id, i.block_id, i.format, i.width, i.height, i.page, i.original_name
+		SELECT i.id, i.document_id, i.block_id, i.format, i.width, i.height, i.page, i.original_name, i.description
 		FROM images i
 		JOIN content_blocks cb ON i.block_id = cb.id AND i.document_id = cb.document_id
 		WHERE i.document_id = ? AND cb.section = ?
@@ -286,6 +290,7 @@ func (s *Store) GetImagesBySection(documentID, section string) ([]ImageInfo, err
 			&info.Height,
 			&info.Page,
 			&info.OriginalName,
+			&info.Description,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan image: %w", err)
@@ -304,7 +309,7 @@ func (s *Store) GetImagesByPage(documentID string, page int) ([]ImageInfo, error
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(`
-		SELECT id, document_id, block_id, format, width, height, page, original_name
+		SELECT id, document_id, block_id, format, width, height, page, original_name, description
 		FROM images WHERE document_id = ? AND page = ?
 		ORDER BY id
 	`, documentID, page)
@@ -327,6 +332,7 @@ func (s *Store) GetImagesByPage(documentID string, page int) ([]ImageInfo, error
 			&info.Height,
 			&info.Page,
 			&info.OriginalName,
+			&info.Description,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan image: %w", err)

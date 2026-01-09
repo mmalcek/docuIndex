@@ -170,7 +170,33 @@ doc, err := store.IndexCustomData(&docuindex.CustomData{
     },
 })
 
+// Index custom data with images
+doc, err := store.IndexCustomData(&docuindex.CustomData{
+    Source: "products",
+    Name:   "Product Catalog",
+    Entries: []docuindex.DataEntry{
+        {
+            ID:      "laptop-001",
+            Content: "MacBook Pro 16-inch with M3 chip, 36GB RAM",
+            Images: []docuindex.CustomImage{
+                {
+                    Data:        jpegBytes,           // Image bytes (required)
+                    Format:      "jpeg",              // "png", "jpeg", "gif", "bmp" (required)
+                    Description: "Front view",       // AI-friendly alt text (optional)
+                    OriginalName: "macbook.jpg",     // Display name (optional)
+                    // Width/Height auto-detected if not provided
+                },
+            },
+        },
+    },
+    // Document-level images (not tied to specific entry)
+    Images: []docuindex.CustomImage{
+        {Data: logoPng, Format: "png", Description: "Company logo"},
+    },
+})
+
 // Upsert custom data (update existing document if source + external_id match)
+// On update, existing images are automatically replaced
 doc, err := store.UpsertCustomData(&docuindex.CustomData{
     Source:      "salesforce-api",
     Name:        "Salesforce Opportunities",
@@ -350,6 +376,11 @@ block := doc.GetBlockByID("blk_042")
 images, err := store.GetImagesByDocumentFiltered("doc-id", "", 0) // All images
 images, err := store.GetImagesByDocumentFiltered("doc-id", "Introduction", 0) // By section
 images, err := store.GetImagesByDocumentFiltered("doc-id", "", 3) // By page
+
+// Get image info with AI-friendly description
+info, err := store.GetImageInfo("image-uuid")
+fmt.Printf("Image: %s - %s\n", info.OriginalName, info.Description)
+// e.g., "macbook.jpg - Front view of MacBook Pro 16-inch"
 ```
 
 ### Store Statistics
@@ -418,7 +449,7 @@ The SQLite database contains:
 - **search_terms** - BM25 inverted index with term positions
 - **document_stats** - Statistics for BM25 ranking
 - **vectors** - Block embeddings as BLOBs
-- **images** - Image metadata (actual files in images/ folder)
+- **images** - Image metadata with AI-friendly description (actual files in images/ folder)
 
 ## Search Capabilities
 
