@@ -1,4 +1,4 @@
-module github.com/mariomalcek/docuindex
+module github.com/mariomalcek/docuIndex
 
 go 1.24.0
 

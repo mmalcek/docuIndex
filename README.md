@@ -21,7 +21,7 @@ A pure Go package for parsing PDF and DOCX files and extracting structured conte
 ## Installation
 
 ```bash
-go get github.com/mariomalcek/docuindex
+go get github.com/mariomalcek/docuIndex
 ```
 
 ## Quick Start
@@ -33,7 +33,7 @@ import (
     "fmt"
     "log"
 
-    "github.com/mariomalcek/docuindex"
+    "github.com/mariomalcek/docuIndex"
 )
 
 func main() {
@@ -87,7 +87,7 @@ store, err := docuindex.NewStore("./data",
 #### Configure Embedding Provider (Optional)
 
 ```go
-import "github.com/mariomalcek/docuindex/embedding"
+import "github.com/mariomalcek/docuIndex/embedding"
 
 // Azure OpenAI
 provider, err := embedding.NewProvider(embedding.Config{

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/mariomalcek/docuindex/internal/nlp"
+	"github.com/mariomalcek/docuIndex/internal/nlp"
 )
 
 // SemanticExtractor performs semantic analysis on extracted content

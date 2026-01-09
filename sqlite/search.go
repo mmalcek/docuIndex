@@ -10,7 +10,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/mariomalcek/docuindex/internal/nlp"
+	"github.com/mariomalcek/docuIndex/internal/nlp"
 )
 
 // SearchResult represents a single search hit
