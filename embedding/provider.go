@@ -55,6 +55,9 @@ type Config struct {
 	// Maximum texts per batch request
 	BatchSize int
 
+	// APIVersion for Azure OpenAI (e.g., "v1", "2024-10-21"). Default: "2024-10-21"
+	APIVersion string
+
 	// Request timeout
 	Timeout time.Duration
 

@@ -13,10 +13,11 @@ import (
 // azureProvider implements embedding using Azure OpenAI or Azure AI
 type azureProvider struct {
 	baseProvider
-	client   *http.Client
-	endpoint string
-	apiKey   string
-	model    string
+	client     *http.Client
+	endpoint   string
+	apiKey     string
+	model      string
+	apiVersion string
 }
 
 // Azure OpenAI embedding request
@@ -55,15 +56,21 @@ func newAzureProvider(cfg Config) (*azureProvider, error) {
 		return nil, fmt.Errorf("azure API key is required")
 	}
 
+	apiVersion := cfg.APIVersion
+	if apiVersion == "" {
+		apiVersion = "2024-10-21" // Default to latest stable GA API
+	}
+
 	p := &azureProvider{
 		baseProvider: baseProvider{
 			config:    cfg,
 			dimension: cfg.Dimension,
 		},
-		client:   &http.Client{Timeout: cfg.Timeout},
-		endpoint: strings.TrimSuffix(cfg.Endpoint, "/"),
-		apiKey:   cfg.APIKey,
-		model:    cfg.Model,
+		client:     &http.Client{Timeout: cfg.Timeout},
+		endpoint:   strings.TrimSuffix(cfg.Endpoint, "/"),
+		apiKey:     cfg.APIKey,
+		model:      cfg.Model,
+		apiVersion: apiVersion,
 	}
 
 	return p, nil
@@ -124,11 +131,15 @@ func (p *azureProvider) doRequest(ctx context.Context, texts []string) ([][]floa
 	}
 
 	// Build URL - Azure OpenAI format
-	// Format: {endpoint}/openai/deployments/{deployment}/embeddings?api-version=2023-05-15
+	// Supports both v1 API and legacy deployment-based format
 	url := p.endpoint
 	if !strings.Contains(url, "/embeddings") {
-		if p.model != "" && !strings.Contains(url, "/deployments/") {
-			url = fmt.Sprintf("%s/openai/deployments/%s/embeddings?api-version=2023-05-15", url, p.model)
+		if p.apiVersion == "v1" {
+			// New v1 API format (GA, recommended)
+			url = fmt.Sprintf("%s/openai/v1/embeddings", url)
+		} else if p.model != "" && !strings.Contains(url, "/deployments/") {
+			// Legacy deployment-based format
+			url = fmt.Sprintf("%s/openai/deployments/%s/embeddings?api-version=%s", url, p.model, p.apiVersion)
 		} else {
 			url = fmt.Sprintf("%s/embeddings", url)
 		}

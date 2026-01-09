@@ -425,12 +425,14 @@ docuindex.WithProgressCallback(fn)     // Receive indexing progress updates
 
 ### Embedding Providers
 ```go
-// Azure OpenAI
+// Azure OpenAI (uses latest stable API version 2024-10-21 by default)
 provider, _ := embedding.NewProvider(embedding.Config{
     Provider: "azure",
     Endpoint: os.Getenv("AZURE_ENDPOINT"),
     APIKey:   os.Getenv("AZURE_KEY"),
     Model:    "text-embedding-3-small",
+    // APIVersion: "v1",              // Optional: use new v1 API format
+    // APIVersion: "2024-10-21",      // Optional: explicit version (default)
 })
 
 // OpenAI

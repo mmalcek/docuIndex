@@ -89,12 +89,14 @@ store, err := docuindex.NewStore("./data",
 ```go
 import "github.com/mmalcek/docuIndex/embedding"
 
-// Azure OpenAI
+// Azure OpenAI (defaults to API version 2024-10-21)
 provider, err := embedding.NewProvider(embedding.Config{
-    Provider: "azure",
-    Endpoint: os.Getenv("AZURE_ENDPOINT"),
-    APIKey:   os.Getenv("AZURE_API_KEY"),
-    Model:    "text-embedding-3-small",
+    Provider:   "azure",
+    Endpoint:   os.Getenv("AZURE_ENDPOINT"),
+    APIKey:     os.Getenv("AZURE_API_KEY"),
+    Model:      "text-embedding-3-small",
+    // APIVersion: "v1",           // Optional: use new v1 API format
+    // APIVersion: "2024-10-21",   // Optional: explicit version (default)
 })
 
 // OpenAI
