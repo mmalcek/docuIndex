@@ -328,11 +328,39 @@ results, err := store.Search("renewal",
 results, err := store.Search("renewal",
     docuindex.WithTags(map[string]string{"quarter": "Q4-2024"}))
 
+// Search with tag negation (! prefix excludes matching values)
+results, err := store.Search("bugs",
+    docuindex.WithTags(map[string]string{"status": "!Closed"}))  // Not Closed
+
 // Combined filters
 results, err := store.Search("enterprise",
     docuindex.WithSources("crm-api", "faq"),
     docuindex.WithTags(map[string]string{"type": "customer-notes"}))
 ```
+
+#### Search with Metadata
+
+Include document metadata (tags, source, external ID) in search results:
+
+```go
+// Search with metadata included
+results, err := store.Search("query", docuindex.WithMetadata(true))
+
+for _, r := range results.Results {
+    fmt.Printf("Document: %s\n", r.DocumentName)
+    fmt.Printf("  Source: %s\n", r.Source)           // e.g., "crm-api"
+    fmt.Printf("  ExternalID: %s\n", r.ExternalID)   // e.g., "salesforce-123"
+    fmt.Printf("  Tags: %v\n", r.Tags)               // e.g., {"status": "Open", "priority": "High"}
+}
+
+// Combine with tag negation for filtering
+results, err := store.Search("bugs",
+    docuindex.WithTags(map[string]string{"status": "!Closed"}),
+    docuindex.WithMetadata(true),  // Include metadata in results
+)
+```
+
+Note: `WithMetadata` is disabled by default for performance. Enable it when you need to access tags, source, or external ID from search results.
 
 #### Get Context for RAG
 

@@ -1,4 +1,4 @@
 package docuindex
 
 // Version is the current library version (semver)
-const Version = "0.0.11"
+const Version = "0.0.12"

@@ -286,17 +286,20 @@ type ImageInfo struct {
 
 // SearchResult represents a single search hit
 type SearchResult struct {
-	DocumentID   string         `json:"document_id"`
-	DocumentName string         `json:"document_name"`
-	BlockID      string         `json:"block_id"`
-	Content      string         `json:"content"`      // Matched content
-	Snippet      string         `json:"snippet"`      // Highlighted snippet
-	Score        float64        `json:"score"`        // Relevance score
-	Page         int            `json:"page"`         // Page number
-	Section      string         `json:"section"`      // Section name
-	Context      []ContentBlock `json:"context"`      // Surrounding blocks for RAG
-	Positions    []int          `json:"positions"`    // Match positions in content
-	Images       []string       `json:"images,omitempty"` // Image paths in same section
+	DocumentID   string            `json:"document_id"`
+	DocumentName string            `json:"document_name"`
+	BlockID      string            `json:"block_id"`
+	Content      string            `json:"content"`                 // Matched content
+	Snippet      string            `json:"snippet"`                 // Highlighted snippet
+	Score        float64           `json:"score"`                   // Relevance score
+	Page         int               `json:"page"`                    // Page number
+	Section      string            `json:"section"`                 // Section name
+	Context      []ContentBlock    `json:"context"`                 // Surrounding blocks for RAG
+	Positions    []int             `json:"positions"`               // Match positions in content
+	Images       []string          `json:"images,omitempty"`        // Image paths in same section
+	Tags         map[string]string `json:"tags,omitempty"`          // Document tags
+	Source       string            `json:"source,omitempty"`        // Source identifier (for CustomData)
+	ExternalID   string            `json:"external_id,omitempty"`   // External system ID
 }
 
 // SearchResults contains search results with metadata

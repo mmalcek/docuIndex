@@ -204,7 +204,7 @@ CREATE TABLE document_tags (
 | `Document` | Parsed document with metadata and content blocks |
 | `DocumentInfo` | Metadata (ID, Name, Size, PageCount, Format, Source, Description, ImportedAt, ExternalID, Timestamps) |
 | `Store` | Document storage and search interface |
-| `SearchResult` | Search hit with score, snippet, context, and images |
+| `SearchResult` | Search hit with score, snippet, context, images, and optional metadata (Tags, Source, ExternalID via WithMetadata) |
 | `SearchResults` | Query results with timing and total hits |
 | `BoundingBox` | Position information with `RelativePosition()` method |
 | `SemanticInfo` | AI-friendly metadata (headings, sections, keywords) |
@@ -324,6 +324,20 @@ results, err := store.Search("query",
     docuindex.WithSources("crm", "pdf"),       // Filter by source or format
     docuindex.WithTags(map[string]string{"team": "sales"}),  // Filter by tags
 )
+
+// Search with tag negation (! prefix excludes matching values)
+results, err := store.Search("bugs",
+    docuindex.WithTags(map[string]string{"status": "!Closed"}),  // Not Closed
+)
+
+// Search with metadata (includes tags, source, external_id in results)
+results, err := store.Search("query", docuindex.WithMetadata(true))
+for _, r := range results.Results {
+    fmt.Printf("Document: %s\n", r.DocumentName)
+    fmt.Printf("  Source: %s\n", r.Source)
+    fmt.Printf("  ExternalID: %s\n", r.ExternalID)
+    fmt.Printf("  Tags: %v\n", r.Tags)
+}
 
 // Get context for RAG
 context, err := store.GetContext(docID, blockID, windowSize)
@@ -513,8 +527,9 @@ docuindex.WithSearchMode(mode)         // keyword, semantic, or hybrid (default:
 docuindex.WithVectorWeight(float64)    // Weight for vector search (0-1)
 docuindex.WithKeywordWeight(float64)   // Weight for keyword search (0-1)
 docuindex.WithSources(...strings)      // Filter by source or format
-docuindex.WithTags(map[string]string)  // Filter by tags (AND logic)
+docuindex.WithTags(map[string]string)  // Filter by tags (AND logic, supports ! prefix for negation)
 docuindex.WithImages(bool)             // Include image paths in results
+docuindex.WithMetadata(bool)           // Include tags, source, external_id in results
 docuindex.WithFilter(*Filter)          // Use Filter DSL for advanced filtering
 docuindex.WithAgentOutput(bool)        // Return AgentSearchResponse format
 docuindex.WithEstimateTokens(bool)     // Include token estimates in results
@@ -742,6 +757,8 @@ go run main.go detect-intent "summarize this"  # Detect query intent type
 | Get unembedded blocks | `sqlite/vectors.go` GetUnembeddedBlocks() |
 | Find document by external ID | `docuindex.go` FindByExternalID() |
 | Tune vector search recall/speed | `options.go` WithEfSearch() per-query, WithHNSWConfig() store-wide |
+| Include metadata in search results | `options.go` WithMetadata(), `docuindex.go` Search() |
+| Filter by negated tag values | `sqlite/tags.go` GetDocumentIDsByTags() with `!` prefix |
 
 ## Dependencies
 

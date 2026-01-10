@@ -70,7 +70,8 @@ func (s *Store) GetDocumentTags(documentID string) (map[string]string, error) {
 	return tags, rows.Err()
 }
 
-// GetDocumentIDsByTags returns document IDs matching all specified tags (AND logic)
+// GetDocumentIDsByTags returns document IDs matching all specified tags (AND logic).
+// Supports negation with "!" prefix (e.g., "!Closed" means not equal to "Closed").
 func (s *Store) GetDocumentIDsByTags(tags map[string]string) ([]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -79,18 +80,36 @@ func (s *Store) GetDocumentIDsByTags(tags map[string]string) ([]string, error) {
 		return nil, nil
 	}
 
-	// Build query to match ALL tags using INTERSECT
+	// Separate positive and negative tags
+	positiveTags := make(map[string]string)
+	negativeTags := make(map[string]string)
+
+	for key, value := range tags {
+		if len(value) > 0 && value[0] == '!' {
+			negativeTags[key] = value[1:] // Remove ! prefix
+		} else {
+			positiveTags[key] = value
+		}
+	}
+
+	// Build query for positive tags using INTERSECT
 	var queries []string
 	var args []interface{}
 
-	for key, value := range tags {
+	for key, value := range positiveTags {
 		queries = append(queries, `SELECT document_id FROM document_tags WHERE tag_key = ? AND tag_value = ?`)
 		args = append(args, key, value)
 	}
 
-	query := strings.Join(queries, " INTERSECT ")
+	// Start with all documents if no positive tags, else use intersection
+	var baseQuery string
+	if len(queries) > 0 {
+		baseQuery = strings.Join(queries, " INTERSECT ")
+	} else {
+		baseQuery = `SELECT DISTINCT document_id FROM document_tags`
+	}
 
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.db.Query(baseQuery, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query documents by tags: %w", err)
 	}
@@ -104,8 +123,45 @@ func (s *Store) GetDocumentIDsByTags(tags map[string]string) ([]string, error) {
 		}
 		docIDs = append(docIDs, docID)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
-	return docIDs, rows.Err()
+	// Filter out documents with negative tag values
+	if len(negativeTags) > 0 {
+		docIDs, err = s.filterOutNegativeTags(docIDs, negativeTags)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return docIDs, nil
+}
+
+// filterOutNegativeTags removes documents that have the specified tag values
+func (s *Store) filterOutNegativeTags(docIDs []string, negativeTags map[string]string) ([]string, error) {
+	var result []string
+	for _, docID := range docIDs {
+		exclude := false
+		for key, value := range negativeTags {
+			var count int
+			err := s.db.QueryRow(`
+				SELECT COUNT(*) FROM document_tags
+				WHERE document_id = ? AND tag_key = ? AND tag_value = ?
+			`, docID, key, value).Scan(&count)
+			if err != nil {
+				continue
+			}
+			if count > 0 {
+				exclude = true
+				break
+			}
+		}
+		if !exclude {
+			result = append(result, docID)
+		}
+	}
+	return result, nil
 }
 
 // GetDocumentIDsBySources returns document IDs matching any of the specified sources

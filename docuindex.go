@@ -1339,6 +1339,20 @@ func (s *Store) Search(query string, opts ...SearchOption) (*SearchResults, erro
 				results[i].Images = imagePaths
 			}
 		}
+
+		// Get document metadata if requested
+		if config.IncludeMetadata {
+			// Get document info (source, external ID)
+			if doc, err := s.db.GetDocument(r.DocumentID); err == nil && doc != nil {
+				results[i].Source = doc.Info.Source
+				results[i].ExternalID = doc.Info.ExternalID
+			}
+
+			// Get document tags
+			if tags, err := s.db.GetDocumentTags(r.DocumentID); err == nil && len(tags) > 0 {
+				results[i].Tags = tags
+			}
+		}
 	}
 
 	return &SearchResults{

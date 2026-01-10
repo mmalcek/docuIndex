@@ -685,7 +685,8 @@ func (s *Store) applyFilter(filter *FilterConfig) ([]string, error) {
 	return docIDs, nil
 }
 
-// filterByTags filters document IDs by tags (AND logic)
+// filterByTags filters document IDs by tags (AND logic).
+// Supports negation with "!" prefix (e.g., "!Closed" means not equal to "Closed").
 func (s *Store) filterByTags(docIDs []string, tags map[string]string) ([]string, error) {
 	if len(tags) == 0 {
 		return docIDs, nil
@@ -696,13 +697,29 @@ func (s *Store) filterByTags(docIDs []string, tags map[string]string) ([]string,
 		match := true
 		for key, value := range tags {
 			var count int
-			err := s.db.QueryRow(`
-				SELECT COUNT(*) FROM document_tags
-				WHERE document_id = ? AND tag_key = ? AND tag_value = ?
-			`, docID, key, value).Scan(&count)
-			if err != nil || count == 0 {
-				match = false
-				break
+			var err error
+
+			if len(value) > 0 && value[0] == '!' {
+				// Negation: document must NOT have this tag value
+				negatedValue := value[1:]
+				err = s.db.QueryRow(`
+					SELECT COUNT(*) FROM document_tags
+					WHERE document_id = ? AND tag_key = ? AND tag_value = ?
+				`, docID, key, negatedValue).Scan(&count)
+				if err != nil || count > 0 {
+					match = false
+					break
+				}
+			} else {
+				// Normal: document must have this exact tag value
+				err = s.db.QueryRow(`
+					SELECT COUNT(*) FROM document_tags
+					WHERE document_id = ? AND tag_key = ? AND tag_value = ?
+				`, docID, key, value).Scan(&count)
+				if err != nil || count == 0 {
+					match = false
+					break
+				}
 			}
 		}
 		if match {

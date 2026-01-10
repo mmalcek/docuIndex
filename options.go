@@ -153,6 +153,7 @@ type searchConfig struct {
 	IncludeCitations bool          // Add citation references [1], [2], etc.
 	ChunkOptions     *ChunkOptions // Chunking options for results
 	Filter           *Filter       // Advanced filter DSL
+	IncludeMetadata  bool          // Include document tags, source, external ID in results
 
 	// HNSW tuning
 	EfSearch int // Override efSearch for this query (0 = use default)
@@ -381,5 +382,13 @@ func WithFilter(f *Filter) SearchOption {
 func WithEfSearch(ef int) SearchOption {
 	return func(c *searchConfig) {
 		c.EfSearch = ef
+	}
+}
+
+// WithMetadata includes document metadata (tags, source, external ID) in search results.
+// This adds extra database queries per result, so it's disabled by default for performance.
+func WithMetadata(include bool) SearchOption {
+	return func(c *searchConfig) {
+		c.IncludeMetadata = include
 	}
 }
