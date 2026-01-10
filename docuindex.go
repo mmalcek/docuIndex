@@ -1214,6 +1214,27 @@ func (s *Store) ListDocuments() ([]*DocumentInfo, error) {
 	return fromSQLiteDocumentInfos(infos), nil
 }
 
+// FindByExternalID finds a document by source and external ID
+func (s *Store) FindByExternalID(source, externalID string) (*Document, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	sqliteDoc, err := s.db.FindBySourceAndExternalID(source, externalID)
+	if err != nil {
+		return nil, err
+	}
+	if sqliteDoc == nil {
+		return nil, nil
+	}
+
+	// Get the full document
+	fullDoc, err := s.db.GetDocument(sqliteDoc.ID)
+	if err != nil {
+		return nil, err
+	}
+	return fromSQLiteDocument(fullDoc), nil
+}
+
 // Search performs a search across all documents
 func (s *Store) Search(query string, opts ...SearchOption) (*SearchResults, error) {
 	s.mu.RLock()
@@ -1273,6 +1294,7 @@ func (s *Store) Search(query string, opts ...SearchOption) (*SearchResults, erro
 		VectorWeight:  config.VectorWeight,
 		KeywordWeight: config.KeywordWeight,
 		Timeout:       30 * time.Second,
+		EfSearch:      config.EfSearch,
 	}
 
 	ctx := context.Background()
@@ -1354,7 +1376,8 @@ func (s *Store) keywordSearch(query string, limit int) ([]hsearch.SearchResult, 
 }
 
 // vectorSearch performs semantic vector search (used by hybrid searcher)
-func (s *Store) vectorSearch(ctx context.Context, query string, limit int) ([]hsearch.VectorSearchResult, error) {
+// ef parameter overrides HNSW efSearch (0 = use default)
+func (s *Store) vectorSearch(ctx context.Context, query string, limit int, ef int) ([]hsearch.VectorSearchResult, error) {
 	if s.embedder == nil || s.hnsw == nil {
 		return nil, nil
 	}
@@ -1365,8 +1388,8 @@ func (s *Store) vectorSearch(ctx context.Context, query string, limit int) ([]hs
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
 
-	// Search HNSW
-	hnswResults, err := s.hnsw.Search(queryVector, limit)
+	// Search HNSW with optional ef override
+	hnswResults, err := s.hnsw.SearchWithEf(queryVector, limit, ef)
 	if err != nil {
 		return nil, fmt.Errorf("HNSW search: %w", err)
 	}
@@ -2095,6 +2118,7 @@ func (s *Store) SearchForAgent(query string, opts ...SearchOption) (*AgentSearch
 		VectorWeight:  config.VectorWeight,
 		KeywordWeight: config.KeywordWeight,
 		Timeout:       30 * time.Second,
+		EfSearch:      config.EfSearch,
 	}
 
 	ctx := context.Background()

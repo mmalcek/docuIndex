@@ -148,11 +148,14 @@ type searchConfig struct {
 	Tags          map[string]string // Filter by tags (AND logic)
 
 	// Agent-friendly output options
-	AgentOutput    bool        // Return AgentSearchResponse format
-	EstimateTokens bool        // Include token count estimates
-	IncludeCitations bool      // Add citation references [1], [2], etc.
-	ChunkOptions   *ChunkOptions // Chunking options for results
-	Filter         *Filter       // Advanced filter DSL
+	AgentOutput      bool          // Return AgentSearchResponse format
+	EstimateTokens   bool          // Include token count estimates
+	IncludeCitations bool          // Add citation references [1], [2], etc.
+	ChunkOptions     *ChunkOptions // Chunking options for results
+	Filter           *Filter       // Advanced filter DSL
+
+	// HNSW tuning
+	EfSearch int // Override efSearch for this query (0 = use default)
 }
 
 func defaultSearchConfig() *searchConfig {
@@ -163,7 +166,7 @@ func defaultSearchConfig() *searchConfig {
 		HighlightPre:  "**",
 		HighlightPost: "**",
 		IncludeImages: false,
-		SearchMode:    SearchModeKeyword, // Default to keyword until embeddings configured
+		SearchMode:    SearchModeHybrid, // Default to hybrid (falls back to keyword if no embeddings)
 		VectorWeight:  0.5,
 		KeywordWeight: 0.5,
 	}
@@ -368,5 +371,15 @@ func WithChunking(opts ChunkOptions) SearchOption {
 func WithFilter(f *Filter) SearchOption {
 	return func(c *searchConfig) {
 		c.Filter = f
+	}
+}
+
+// WithEfSearch overrides the HNSW efSearch parameter for this query.
+// Higher values improve recall at the cost of latency.
+// If ef <= 0 (default), the store's configured EfSearch value is used.
+// Recommended: 50 for speed, 100 for balanced, 200+ for high recall.
+func WithEfSearch(ef int) SearchOption {
+	return func(c *searchConfig) {
+		c.EfSearch = ef
 	}
 }

@@ -405,6 +405,14 @@ func (h *HNSW) deleteUnlocked(id string) {
 
 // Search finds the k nearest neighbors to the query vector
 func (h *HNSW) Search(query []float32, k int) ([]SearchResult, error) {
+	return h.SearchWithEf(query, k, 0)
+}
+
+// SearchWithEf finds the k nearest neighbors with a custom efSearch parameter.
+// If ef <= 0, the default EfSearch value is used.
+// Higher ef values improve recall at the cost of latency.
+// Recommended: ef=50 for speed, ef=100 for balanced, ef=200+ for high recall.
+func (h *HNSW) SearchWithEf(query []float32, k int, ef int) ([]SearchResult, error) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
@@ -427,8 +435,10 @@ func (h *HNSW) Search(query []float32, k int) ([]SearchResult, error) {
 		}
 	}
 
-	// Search at level 0 with ef=efSearch
-	ef := h.EfSearch
+	// Use provided ef or default
+	if ef <= 0 {
+		ef = h.EfSearch
+	}
 	if ef < k {
 		ef = k
 	}

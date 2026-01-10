@@ -21,7 +21,8 @@ type HybridSearcher struct {
 	KeywordSearch func(query string, limit int) ([]SearchResult, error)
 
 	// VectorSearch performs vector similarity search
-	VectorSearch func(ctx context.Context, query string, limit int) ([]VectorSearchResult, error)
+	// The ef parameter overrides HNSW efSearch (0 = use default)
+	VectorSearch func(ctx context.Context, query string, limit int, ef int) ([]VectorSearchResult, error)
 
 	// GetBlockContent retrieves content for a block
 	GetBlockContent func(docID, blockID string) (content, snippet string, page int, section string, err error)
@@ -41,6 +42,7 @@ type HybridSearchOptions struct {
 	VectorWeight  float64
 	KeywordWeight float64
 	Timeout       time.Duration
+	EfSearch      int // Override HNSW efSearch (0 = use default)
 }
 
 // DefaultHybridSearchOptions returns default options
@@ -136,7 +138,7 @@ func (h *HybridSearcher) vectorOnlySearch(ctx context.Context, query string, opt
 	}
 
 	vectorStart := time.Now()
-	vectorResults, err := h.VectorSearch(ctx, query, opts.MaxResults)
+	vectorResults, err := h.VectorSearch(ctx, query, opts.MaxResults, opts.EfSearch)
 	results.VectorTime = time.Since(vectorStart)
 
 	if err != nil {
@@ -201,7 +203,7 @@ func (h *HybridSearcher) hybridSearch(ctx context.Context, query string, opts *H
 	go func() {
 		defer wg.Done()
 		vectorStart := time.Now()
-		vectorResults, vectorErr = h.VectorSearch(ctx, query, opts.MaxResults*2) // Get more for fusion
+		vectorResults, vectorErr = h.VectorSearch(ctx, query, opts.MaxResults*2, opts.EfSearch) // Get more for fusion
 		results.VectorTime = time.Since(vectorStart)
 	}()
 

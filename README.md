@@ -221,6 +221,12 @@ if !lastImport.IsZero() {
 // Get by ID
 doc, err := store.GetDocument("document-id")
 
+// Find by external system ID (e.g., Salesforce record ID)
+doc, err := store.FindByExternalID("salesforce-api", "opportunities-q4")
+if doc != nil {
+    fmt.Printf("Found: %s\n", doc.Info.Name)
+}
+
 // List all documents
 docs, err := store.ListDocuments()
 for _, info := range docs {
@@ -261,21 +267,21 @@ for _, r := range results.Results {
 #### Search Modes
 
 ```go
-// Keyword search (BM25) - default
+// Hybrid search (BM25 + vectors with RRF fusion) - default
+// Falls back to keyword-only if no embedding provider is configured
+results, err := store.Search("climate change impacts",
+    docuindex.WithVectorWeight(0.6),   // Weight for semantic results
+    docuindex.WithKeywordWeight(0.4),  // Weight for keyword results
+)
+
+// Keyword search (BM25 only)
 results, err := store.Search("neural networks",
     docuindex.WithSearchMode(docuindex.SearchModeKeyword),
 )
 
-// Semantic search (vector embeddings) - requires embedding provider
+// Semantic search (vector embeddings only) - requires embedding provider
 results, err := store.Search("how does machine learning work",
     docuindex.WithSearchMode(docuindex.SearchModeSemantic),
-)
-
-// Hybrid search (BM25 + vectors with RRF fusion)
-results, err := store.Search("climate change impacts",
-    docuindex.WithSearchMode(docuindex.SearchModeHybrid),
-    docuindex.WithVectorWeight(0.6),   // Weight for semantic results
-    docuindex.WithKeywordWeight(0.4),  // Weight for keyword results
 )
 ```
 
@@ -574,6 +580,7 @@ The `BackgroundEmbeddingStatus` provides detailed progress:
 | Real-time indexing | 100 | 50 | Balanced |
 
 ```go
+// Store-wide configuration (applied to all searches)
 store, _ := docuindex.NewStore("./data",
     docuindex.WithHNSWConfig(docuindex.HNSWConfig{
         M:        16,   // Max connections (default)
@@ -581,6 +588,12 @@ store, _ := docuindex.NewStore("./data",
         EfSearch: 100,  // Good search quality
     }),
 )
+
+// Per-query override for recall vs latency tradeoff
+results, _ := store.Search("important query",
+    docuindex.WithEfSearch(200),  // Higher recall for this query
+)
+// Recommended: 50=fast, 100=balanced, 200+=high recall
 ```
 
 See [OPTIMISATIONS.md](OPTIMISATIONS.md) for detailed performance tuning guide.

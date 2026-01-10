@@ -300,7 +300,13 @@ if !lastImport.IsZero() {
     // Fetch only new data since lastImport
 }
 
-// Search across all documents (keyword search by default)
+// Find document by external system ID (e.g., Salesforce record ID)
+doc, err := store.FindByExternalID("salesforce", "opps-q4-2024")
+if doc != nil {
+    fmt.Printf("Found: %s\n", doc.Name)
+}
+
+// Search across all documents (hybrid by default, falls back to keyword if no embeddings)
 results, err := store.Search("query terms", docuindex.WithMaxResults(10))
 
 // Hybrid search (requires embedding provider)
@@ -503,7 +509,7 @@ docuindex.WithHighlight(pre, post)     // Match highlighting markers
 docuindex.WithPageRange(start, end)    // Filter by page range
 docuindex.WithDocuments(...ids)        // Filter by document IDs
 docuindex.WithSections(...strings)     // Filter by section
-docuindex.WithSearchMode(mode)         // keyword, semantic, or hybrid
+docuindex.WithSearchMode(mode)         // keyword, semantic, or hybrid (default: hybrid)
 docuindex.WithVectorWeight(float64)    // Weight for vector search (0-1)
 docuindex.WithKeywordWeight(float64)   // Weight for keyword search (0-1)
 docuindex.WithSources(...strings)      // Filter by source or format
@@ -514,6 +520,7 @@ docuindex.WithAgentOutput(bool)        // Return AgentSearchResponse format
 docuindex.WithEstimateTokens(bool)     // Include token estimates in results
 docuindex.WithCitations(bool)          // Add citation references [1], [2], etc.
 docuindex.WithChunking(ChunkOptions)   // Configure result chunking
+docuindex.WithEfSearch(int)            // Override HNSW efSearch (0=default, 50=fast, 200+=high recall)
 ```
 
 ### Index Options
@@ -677,12 +684,15 @@ go run main.go detect-intent "summarize this"  # Detect query intent type
 
 - **Full-text search**: BM25 on SQLite with inverted index
 - **Semantic search**: Vector similarity via HNSW (optional)
-- **Hybrid search**: Combined BM25 + vector with RRF fusion
+- **Hybrid search**: Combined BM25 + vector with RRF fusion (default mode)
 - **Boolean queries**: AND, OR, NOT operators (+, -, keywords)
 - **Phrase matching**: Quoted exact phrases
 - **Boosting**: Headings boosted 1.5x, exact matches boosted
 - **Tokenization**: Porter stemming, stop word filtering
 - **Context**: RAG-friendly context window retrieval
+- **Per-query tuning**: `WithEfSearch(ef)` to trade recall vs latency (50=fast, 100=balanced, 200+=high recall)
+
+**Note**: Default search mode is hybrid. If no embedding provider is configured, it automatically falls back to keyword-only search.
 
 ## Common Tasks
 
@@ -730,6 +740,8 @@ go run main.go detect-intent "summarize this"  # Detect query intent type
 | Find incomplete embeddings | `docuindex.go` GetDocumentsWithIncompleteEmbeddings() |
 | Resume interrupted embedding | `docuindex.go` ResumeEmbedding(), ResumeAllIncompleteEmbeddings() |
 | Get unembedded blocks | `sqlite/vectors.go` GetUnembeddedBlocks() |
+| Find document by external ID | `docuindex.go` FindByExternalID() |
+| Tune vector search recall/speed | `options.go` WithEfSearch() per-query, WithHNSWConfig() store-wide |
 
 ## Dependencies
 
