@@ -229,6 +229,7 @@ CREATE TABLE document_tags (
 | `TokenCredential` | Interface for Azure token-based auth (compatible with azcore.TokenCredential) |
 | `DatabaseInfo` | Database schema info (SchemaVersion, LibraryVersion, CreatedAt, LastMigration) |
 | `AccessToken` | Azure access token with expiry time |
+| `HNSWConfig` | HNSW vector index configuration (M, EfConst, EfSearch) |
 
 ## Public API
 
@@ -417,6 +418,22 @@ filter := docuindex.NewFilter().
     HasEmbeddings(true)
 
 results, err := store.Search("query", docuindex.WithFilter(filter))
+
+// === Bulk Import & Deferred Embedding ===
+
+// Batch index multiple custom data records (optimized for bulk imports)
+docs, err := store.IndexCustomDataBatch(allData,
+    docuindex.WithDeferEmbedding(true),  // Skip embedding during indexing
+)
+
+// Get documents that need embeddings (for resumable maintenance tasks)
+pending, err := store.GetDocumentsWithoutEmbeddings()
+
+// Embed specific documents by ID
+err := store.EmbedDocuments(docID1, docID2, ...)
+
+// Embed ALL documents that don't have embeddings yet
+err := store.EmbedPendingDocuments()
 ```
 
 ## Configuration Options
@@ -431,6 +448,7 @@ docuindex.WithChecksum(bool)           // Compute document checksums
 docuindex.WithStemming(bool)           // Porter stemming (default: true)
 docuindex.WithStopWords(bool)          // Filter stop words (default: true)
 docuindex.WithDedupCheck(bool)         // Enable duplicate detection on indexing
+docuindex.WithHNSWConfig(HNSWConfig)   // Configure HNSW index (M, EfConst, EfSearch)
 ```
 
 ### Search Options
@@ -458,6 +476,7 @@ docuindex.WithChunking(ChunkOptions)   // Configure result chunking
 ### Index Options
 ```go
 docuindex.WithProgressCallback(fn)     // Receive indexing progress updates
+docuindex.WithDeferEmbedding(bool)     // Skip embedding during indexing (use EmbedPendingDocuments later)
 ```
 
 ### Embedding Providers
@@ -656,6 +675,10 @@ go run main.go detect-intent "summarize this"  # Detect query intent type
 | Modify stemming | `internal/nlp/stemmer.go` Stem() |
 | Get database info | `docuindex.go` DatabaseInfo() |
 | Bump library version | `version.go` Version constant |
+| Bulk import custom data | `docuindex.go` IndexCustomDataBatch() with WithDeferEmbedding |
+| Configure HNSW parameters | `options.go` WithHNSWConfig() |
+| Find unprocessed documents | `docuindex.go` GetDocumentsWithoutEmbeddings() |
+| Batch embed documents | `docuindex.go` EmbedPendingDocuments(), EmbedDocuments() |
 
 ## Dependencies
 

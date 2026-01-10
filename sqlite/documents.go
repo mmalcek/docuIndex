@@ -332,3 +332,70 @@ func jsonUnmarshal(data string, v interface{}) error {
 	}
 	return json.Unmarshal([]byte(data), v)
 }
+
+// GetDocumentsWithoutEmbeddings returns documents that have embeddable content blocks
+// but don't have any embeddings yet. This is used for deferred embedding patterns.
+func (s *Store) GetDocumentsWithoutEmbeddings() ([]DocumentInfo, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Find documents that have text/heading/custom blocks with content
+	// but no corresponding vectors
+	rows, err := s.db.Query(`
+		SELECT DISTINCT d.id, d.name, d.original_path, d.format, d.size_bytes,
+		       d.page_count, d.checksum, d.created_at, d.updated_at,
+		       d.source, d.description, d.imported_at, d.external_id
+		FROM documents d
+		INNER JOIN content_blocks cb ON cb.document_id = d.id
+		WHERE cb.type IN ('text', 'heading', 'custom')
+		  AND cb.content IS NOT NULL
+		  AND cb.content != ''
+		  AND NOT EXISTS (
+		      SELECT 1 FROM vectors v WHERE v.document_id = d.id
+		  )
+		ORDER BY d.created_at ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query documents without embeddings: %w", err)
+	}
+	defer rows.Close()
+
+	var docs []DocumentInfo
+	for rows.Next() {
+		var doc DocumentInfo
+		var createdAt, updatedAt string
+		var source, description, importedAt, externalID sql.NullString
+
+		err := rows.Scan(
+			&doc.ID,
+			&doc.Name,
+			&doc.OriginalPath,
+			&doc.Format,
+			&doc.SizeBytes,
+			&doc.PageCount,
+			&doc.Checksum,
+			&createdAt,
+			&updatedAt,
+			&source,
+			&description,
+			&importedAt,
+			&externalID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan document: %w", err)
+		}
+
+		doc.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		doc.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+		doc.Source = source.String
+		doc.Description = description.String
+		doc.ExternalID = externalID.String
+		if importedAt.String != "" {
+			doc.ImportedAt, _ = time.Parse(time.RFC3339, importedAt.String)
+		}
+
+		docs = append(docs, doc)
+	}
+
+	return docs, rows.Err()
+}

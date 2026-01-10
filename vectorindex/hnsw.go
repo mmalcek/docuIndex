@@ -222,6 +222,179 @@ func (h *HNSW) Delete(id string) error {
 	return nil
 }
 
+// VectorItem represents a vector to be added in batch
+type VectorItem struct {
+	ID     string
+	Vector []float32
+}
+
+// AddBatch adds multiple vectors efficiently with a single lock acquisition.
+// This is more efficient than calling Add() multiple times for bulk imports.
+func (h *HNSW) AddBatch(items []VectorItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	for _, item := range items {
+		if err := h.addUnlocked(item.ID, item.Vector); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// addUnlocked is the internal add implementation without locking
+func (h *HNSW) addUnlocked(id string, vector []float32) error {
+	if h.dimension == 0 {
+		h.dimension = len(vector)
+	} else if len(vector) != h.dimension {
+		return fmt.Errorf("dimension mismatch: expected %d, got %d", h.dimension, len(vector))
+	}
+
+	// Check if already exists
+	if _, exists := h.nodes[id]; exists {
+		// Update existing node
+		h.nodes[id].Vector = vector
+		return nil
+	}
+
+	// Calculate random level for new node
+	level := h.randomLevel()
+
+	// Create new node
+	newNode := &node{
+		ID:      id,
+		Vector:  vector,
+		Level:   level,
+		Friends: make([][]string, level+1),
+	}
+
+	// Initialize friend lists
+	for i := range newNode.Friends {
+		newNode.Friends[i] = make([]string, 0, h.M)
+	}
+
+	// If first node, set as entry point
+	if h.entryID == "" {
+		h.nodes[id] = newNode
+		h.entryID = id
+		h.maxLevel = level
+		h.isDirty = true
+		h.pendingAdds++
+		return nil
+	}
+
+	// Find entry point for insertion
+	currID := h.entryID
+
+	// Traverse from top level down to level+1
+	for lc := h.maxLevel; lc > level; lc-- {
+		currID = h.searchLayer(vector, currID, 1, lc)[0].ID
+	}
+
+	// Insert at each level from level down to 0
+	for lc := min(level, h.maxLevel); lc >= 0; lc-- {
+		neighbors := h.searchLayer(vector, currID, h.EfConst, lc)
+		selectedNeighbors := h.selectNeighbors(vector, neighbors, h.M)
+
+		// Connect new node to neighbors
+		for _, neighbor := range selectedNeighbors {
+			newNode.Friends[lc] = append(newNode.Friends[lc], neighbor.ID)
+		}
+
+		// Connect neighbors back to new node
+		for _, neighbor := range selectedNeighbors {
+			neighborNode := h.nodes[neighbor.ID]
+			neighborNode.Friends[lc] = append(neighborNode.Friends[lc], id)
+
+			// Prune if too many connections
+			if len(neighborNode.Friends[lc]) > h.M {
+				neighborNode.Friends[lc] = h.pruneNeighbors(neighborNode, lc)
+			}
+		}
+
+		if len(neighbors) > 0 {
+			currID = neighbors[0].ID
+		}
+	}
+
+	h.nodes[id] = newNode
+
+	// Update entry point if new node has higher level
+	if level > h.maxLevel {
+		h.entryID = id
+		h.maxLevel = level
+	}
+
+	// Track change
+	h.isDirty = true
+	h.pendingAdds++
+
+	return nil
+}
+
+// DeleteBatch removes multiple vectors efficiently with a single lock acquisition.
+func (h *HNSW) DeleteBatch(ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	for _, id := range ids {
+		h.deleteUnlocked(id)
+	}
+
+	return nil
+}
+
+// deleteUnlocked is the internal delete implementation without locking
+func (h *HNSW) deleteUnlocked(id string) {
+	node, exists := h.nodes[id]
+	if !exists {
+		return
+	}
+
+	// Remove from all neighbors' friend lists
+	for level, friends := range node.Friends {
+		for _, friendID := range friends {
+			friendNode := h.nodes[friendID]
+			if friendNode != nil {
+				friendNode.Friends[level] = removeFromSlice(friendNode.Friends[level], id)
+			}
+		}
+	}
+
+	delete(h.nodes, id)
+
+	// If deleted node was entry point, find new one
+	if h.entryID == id {
+		if len(h.nodes) == 0 {
+			h.entryID = ""
+			h.maxLevel = -1
+		} else {
+			// Find node with highest level
+			maxLevel := -1
+			for nid, n := range h.nodes {
+				if n.Level > maxLevel {
+					maxLevel = n.Level
+					h.entryID = nid
+				}
+			}
+			h.maxLevel = maxLevel
+		}
+	}
+
+	// Track change
+	h.isDirty = true
+	h.pendingDeletes++
+}
+
 // Search finds the k nearest neighbors to the query vector
 func (h *HNSW) Search(query []float32, k int) ([]SearchResult, error) {
 	h.mu.RLock()

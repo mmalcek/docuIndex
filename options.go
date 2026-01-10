@@ -3,6 +3,13 @@ package docuindex
 // StoreOption configures Store behavior
 type StoreOption func(*storeConfig)
 
+// HNSWConfig configures the HNSW vector index parameters
+type HNSWConfig struct {
+	M        int // Max connections per layer (default: 16, range: 4-64)
+	EfConst  int // Construction ef parameter (default: 200, range: 10-500)
+	EfSearch int // Search ef parameter (default: 50, range: 10-500)
+}
+
 type storeConfig struct {
 	// Storage settings
 	BasePath       string
@@ -21,6 +28,9 @@ type storeConfig struct {
 	EnableStopWords bool // Filter common words
 	IndexNGrams     bool // Enable n-gram indexing
 	NGramSize       int  // N-gram size (default 3)
+
+	// HNSW settings
+	HNSWConfig *HNSWConfig // HNSW index configuration
 }
 
 func defaultStoreConfig() *storeConfig {
@@ -106,6 +116,15 @@ func WithNGrams(enabled bool, size int) StoreOption {
 func WithDedupCheck(enabled bool) StoreOption {
 	return func(c *storeConfig) {
 		c.EnableDedupCheck = enabled
+	}
+}
+
+// WithHNSWConfig configures the HNSW vector index parameters.
+// Use this to tune performance vs quality trade-offs for bulk imports.
+// See OPTIMISATIONS.md for recommended settings by dataset size.
+func WithHNSWConfig(cfg HNSWConfig) StoreOption {
+	return func(c *storeConfig) {
+		c.HNSWConfig = &cfg
 	}
 }
 
@@ -219,6 +238,7 @@ type indexConfig struct {
 	SourcePath       string           // Original file path for metadata
 	Name             string           // Override document name
 	ProgressCallback ProgressCallback // Callback for progress updates
+	DeferEmbedding   bool             // Skip embedding during indexing (use EmbedPendingDocuments later)
 }
 
 func defaultIndexConfig() *indexConfig {
@@ -252,6 +272,16 @@ func WithName(name string) IndexOption {
 func WithProgressCallback(fn ProgressCallback) IndexOption {
 	return func(c *indexConfig) {
 		c.ProgressCallback = fn
+	}
+}
+
+// WithDeferEmbedding skips embedding generation during indexing.
+// Use store.EmbedPendingDocuments() or store.EmbedDocuments() to generate
+// embeddings later in a batch operation. This is recommended for bulk imports.
+// See OPTIMISATIONS.md for recommended patterns.
+func WithDeferEmbedding(defer_ bool) IndexOption {
+	return func(c *indexConfig) {
+		c.DeferEmbedding = defer_
 	}
 }
 

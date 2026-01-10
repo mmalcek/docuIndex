@@ -78,6 +78,13 @@ const (
 
 // IndexDocument indexes a document's blocks for search
 func (s *Store) IndexDocument(documentID string, blocks []ContentBlock) error {
+	return s.IndexDocumentWithOptions(documentID, blocks, false)
+}
+
+// IndexDocumentWithOptions indexes a document's blocks with optional deferred global stats.
+// Set deferGlobalStats=true for batch operations to avoid O(n) recalculation per document.
+// Call UpdateGlobalStats() once after all documents are indexed.
+func (s *Store) IndexDocumentWithOptions(documentID string, blocks []ContentBlock, deferGlobalStats bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -151,9 +158,11 @@ func (s *Store) IndexDocument(documentID string, blocks []ContentBlock) error {
 		return fmt.Errorf("update document stats: %w", err)
 	}
 
-	// Update global stats
-	if err := updateGlobalStats(tx); err != nil {
-		return err
+	// Update global stats unless deferred
+	if !deferGlobalStats {
+		if err := updateGlobalStats(tx); err != nil {
+			return err
+		}
 	}
 
 	return tx.Commit()
@@ -417,6 +426,25 @@ func updateGlobalStats(tx *sql.Tx) error {
 	}
 
 	return nil
+}
+
+// UpdateGlobalStats recalculates and updates global index statistics.
+// Call this after batch indexing with deferGlobalStats=true.
+func (s *Store) UpdateGlobalStats() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.beginTx()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := updateGlobalStats(tx); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 // GetIndexTermCount returns the number of unique terms in the index

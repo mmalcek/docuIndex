@@ -446,6 +446,107 @@ fmt.Printf("Last migration: %s\n", info.LastMigration)
 // - LastMigration  time.Time - when last schema migration was applied
 ```
 
+## Recommended Design Patterns
+
+### Bulk Import (Large Datasets)
+
+For importing more than 1000 records, use batch mode with deferred embedding:
+
+```go
+// Configure store for bulk import
+store, _ := docuindex.NewStore("./data",
+    docuindex.WithHNSWConfig(docuindex.HNSWConfig{
+        EfConst: 64, // Faster construction for bulk import
+    }),
+)
+
+// Prepare data
+var allData []*docuindex.CustomData
+for _, record := range records {
+    allData = append(allData, &docuindex.CustomData{
+        Source:     "my-source",
+        ExternalID: record.ID,
+        Name:       record.Title,
+        Entries:    []docuindex.DataEntry{{Content: record.Content}},
+    })
+}
+
+// Batch index with deferred embedding
+docs, err := store.IndexCustomDataBatch(allData,
+    docuindex.WithDeferEmbedding(true),
+)
+
+// Generate embeddings after all documents indexed
+err = store.EmbedPendingDocuments()
+```
+
+### Incremental Sync
+
+For ongoing synchronization from external sources:
+
+```go
+// Get last sync timestamp
+lastImport, _ := store.GetLastImportTime("my-source")
+
+// Fetch only changed records
+changedRecords := fetchRecordsModifiedSince(lastImport)
+
+// Index in batches with deferred embedding
+const batchSize = 100
+for i := 0; i < len(changedRecords); i += batchSize {
+    batch := changedRecords[i:min(i+batchSize, len(changedRecords))]
+
+    for _, record := range batch {
+        store.UpsertCustomData(&docuindex.CustomData{
+            Source:     "my-source",
+            ExternalID: record.ID,
+            Name:       record.Title,
+            ImportedAt: time.Now(),
+            Entries:    []docuindex.DataEntry{{Content: record.Content}},
+        },
+            docuindex.WithDeferEmbedding(true),
+        )
+    }
+}
+
+// Process embeddings (resumable if interrupted)
+err = store.EmbedPendingDocuments()
+```
+
+### Resumable Embedding Maintenance
+
+For background processing that survives restarts:
+
+```go
+// Find documents without embeddings (scheduled task / startup)
+pending, _ := store.GetDocumentsWithoutEmbeddings()
+if len(pending) > 0 {
+    log.Printf("Processing %d pending documents", len(pending))
+    err := store.EmbedPendingDocuments()
+}
+```
+
+### HNSW Tuning by Use Case
+
+| Use Case | EfConst | EfSearch | Notes |
+|----------|---------|----------|-------|
+| Small dataset (<10k) | 200 | 50 | Default - best quality |
+| Bulk import | 64 | 100 | Faster construction |
+| High-recall search | 200 | 200 | Slower but more accurate |
+| Real-time indexing | 100 | 50 | Balanced |
+
+```go
+store, _ := docuindex.NewStore("./data",
+    docuindex.WithHNSWConfig(docuindex.HNSWConfig{
+        M:        16,   // Max connections (default)
+        EfConst:  64,   // For bulk import
+        EfSearch: 100,  // Good search quality
+    }),
+)
+```
+
+See [OPTIMISATIONS.md](OPTIMISATIONS.md) for detailed performance tuning guide.
+
 ## Storage Architecture
 
 DocuIndex uses a unified SQLite database for all metadata and search indices:

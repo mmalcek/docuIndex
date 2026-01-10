@@ -65,7 +65,15 @@ func NewStore(basePath string, opts ...StoreOption) (*Store, error) {
 
 	// Load or create HNSW index if embeddings are available
 	hnswPath := filepath.Join(basePath, "hnsw.idx")
-	s.hnsw = vectorindex.NewHNSW(nil)
+	var hnswCfg *vectorindex.Config
+	if config.HNSWConfig != nil {
+		hnswCfg = &vectorindex.Config{
+			M:        config.HNSWConfig.M,
+			EfConst:  config.HNSWConfig.EfConst,
+			EfSearch: config.HNSWConfig.EfSearch,
+		}
+	}
+	s.hnsw = vectorindex.NewHNSW(hnswCfg)
 	if _, err := os.Stat(hnswPath); err == nil {
 		// Load existing index
 		s.hnsw.LoadFromFile(hnswPath)
@@ -2467,6 +2475,15 @@ func fromSQLiteBlock(block *sqlite.ContentBlock) ContentBlock {
 	return cb
 }
 
+// fromSQLiteBlocks converts []sqlite.ContentBlock to []ContentBlock
+func fromSQLiteBlocks(blocks []sqlite.ContentBlock) []ContentBlock {
+	result := make([]ContentBlock, len(blocks))
+	for i := range blocks {
+		result[i] = fromSQLiteBlock(&blocks[i])
+	}
+	return result
+}
+
 // fromSQLiteDocumentInfos converts []sqlite.DocumentInfo to []*DocumentInfo
 func fromSQLiteDocumentInfos(infos []sqlite.DocumentInfo) []*DocumentInfo {
 	out := make([]*DocumentInfo, len(infos))
@@ -2503,4 +2520,299 @@ func intersectStrings(a, b []string) []string {
 		}
 	}
 	return result
+}
+
+// GetDocumentsWithoutEmbeddings returns documents that have embeddable content
+// but don't have any embeddings yet. Use this for resumable maintenance tasks.
+func (s *Store) GetDocumentsWithoutEmbeddings() ([]*DocumentInfo, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	sqliteInfos, err := s.db.GetDocumentsWithoutEmbeddings()
+	if err != nil {
+		return nil, err
+	}
+
+	return fromSQLiteDocumentInfos(sqliteInfos), nil
+}
+
+// EmbedDocuments generates embeddings for specific documents by ID.
+// This is useful for resumable batch processing.
+func (s *Store) EmbedDocuments(docIDs ...string) error {
+	if s.embedder == nil {
+		return fmt.Errorf("embedding provider not configured")
+	}
+
+	if len(docIDs) == 0 {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, docID := range docIDs {
+		doc, err := s.db.GetDocument(docID)
+		if err != nil {
+			return fmt.Errorf("get document %s: %w", docID, err)
+		}
+
+		// Convert to Document for embedDocument
+		mainDoc := &Document{
+			Info: DocumentInfo{
+				ID:   doc.Info.ID,
+				Name: doc.Info.Name,
+			},
+			Content: DocumentContent{
+				Blocks: fromSQLiteBlocks(doc.Blocks),
+			},
+		}
+
+		if err := s.embedDocumentUnlocked(mainDoc); err != nil {
+			return fmt.Errorf("embed document %s: %w", docID, err)
+		}
+	}
+
+	return nil
+}
+
+// EmbedPendingDocuments generates embeddings for all documents that don't have them yet.
+// This is the main method for deferred embedding patterns.
+func (s *Store) EmbedPendingDocuments() error {
+	if s.embedder == nil {
+		return fmt.Errorf("embedding provider not configured")
+	}
+
+	// Get pending documents (no lock needed for read)
+	s.mu.RLock()
+	pending, err := s.db.GetDocumentsWithoutEmbeddings()
+	s.mu.RUnlock()
+	if err != nil {
+		return fmt.Errorf("get pending documents: %w", err)
+	}
+
+	if len(pending) == 0 {
+		return nil
+	}
+
+	// Process each document
+	for _, info := range pending {
+		s.mu.Lock()
+		doc, err := s.db.GetDocument(info.ID)
+		if err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("get document %s: %w", info.ID, err)
+		}
+
+		// Convert to Document for embedDocument
+		mainDoc := &Document{
+			Info: DocumentInfo{
+				ID:   doc.Info.ID,
+				Name: doc.Info.Name,
+			},
+			Content: DocumentContent{
+				Blocks: fromSQLiteBlocks(doc.Blocks),
+			},
+		}
+
+		if err := s.embedDocumentUnlocked(mainDoc); err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("embed document %s: %w", info.ID, err)
+		}
+		s.mu.Unlock()
+	}
+
+	return nil
+}
+
+// embedDocumentUnlocked generates embeddings without acquiring locks (caller must hold lock)
+func (s *Store) embedDocumentUnlocked(doc *Document) error {
+	if s.embedder == nil {
+		return nil
+	}
+
+	// Collect embeddable text blocks
+	var texts []string
+	var blockIDs []string
+
+	for _, block := range doc.Content.Blocks {
+		if block.Type == BlockTypeText || block.Type == BlockTypeHeading || block.Type == BlockTypeCustom {
+			if block.Content != "" {
+				texts = append(texts, block.Content)
+				blockIDs = append(blockIDs, block.ID)
+			}
+		}
+	}
+
+	if len(texts) == 0 {
+		return nil
+	}
+
+	// Generate embeddings in batches
+	ctx := context.Background()
+	batchSize := s.embedder.MaxBatchSize()
+	var vectors []sqlite.VectorItem
+
+	for i := 0; i < len(texts); i += batchSize {
+		end := i + batchSize
+		if end > len(texts) {
+			end = len(texts)
+		}
+
+		embeddings, err := s.embedder.Embed(ctx, texts[i:end])
+		if err != nil {
+			return fmt.Errorf("generate embeddings: %w", err)
+		}
+
+		for j, emb := range embeddings {
+			vectors = append(vectors, sqlite.VectorItem{
+				BlockID:    blockIDs[i+j],
+				DocumentID: doc.Info.ID,
+				Vector:     emb,
+				Text:       texts[i+j],
+				Model:      s.embedder.Name(),
+			})
+		}
+	}
+
+	// Save vectors to SQLite
+	if err := s.db.SaveVectors(doc.Info.ID, vectors); err != nil {
+		return fmt.Errorf("save vectors: %w", err)
+	}
+
+	// Add to HNSW index
+	for _, v := range vectors {
+		id := fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID)
+		s.hnsw.Add(id, v.Vector)
+	}
+
+	// Persist HNSW index
+	hnswPath := filepath.Join(s.config.BasePath, "hnsw.idx")
+	if err := s.hnsw.SaveToFile(hnswPath); err != nil {
+		return fmt.Errorf("save HNSW index: %w", err)
+	}
+
+	return nil
+}
+
+// IndexCustomDataBatch indexes multiple custom data entries efficiently.
+// This is optimized for bulk imports with deferred global stats updates.
+func (s *Store) IndexCustomDataBatch(data []*CustomData, opts ...IndexOption) ([]*Document, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idxCfg := defaultIndexConfig()
+	for _, opt := range opts {
+		opt(idxCfg)
+	}
+
+	var docs []*Document
+
+	for _, d := range data {
+		// Validate
+		if d == nil {
+			continue
+		}
+		if d.Source == "" {
+			return docs, ErrMissingSource
+		}
+		if d.Name == "" {
+			return docs, fmt.Errorf("missing name for source %s", d.Source)
+		}
+		if len(d.Entries) == 0 {
+			return docs, ErrMissingEntries
+		}
+
+		// Generate document ID
+		docID := uuid.New().String()
+
+		// Convert entries to blocks
+		var blocks []ContentBlock
+		var totalSize int64
+
+		for i, entry := range d.Entries {
+			blockID := entry.ID
+			if blockID == "" {
+				blockID = fmt.Sprintf("entry_%d", i)
+			}
+
+			block := ContentBlock{
+				ID:      blockID,
+				Type:    BlockTypeCustom,
+				Content: entry.Content,
+				Page:    1,
+				Semantic: SemanticInfo{
+					Section: d.Source, // Use source as section for grouping
+				},
+			}
+
+			blocks = append(blocks, block)
+			totalSize += int64(len(entry.Content))
+		}
+
+		// Create document
+		now := time.Now().UTC()
+		importedAt := d.ImportedAt
+		if importedAt.IsZero() {
+			importedAt = now
+		}
+
+		doc := &Document{
+			Info: DocumentInfo{
+				ID:          docID,
+				Name:        d.Name,
+				Format:      "customdata",
+				SizeBytes:   totalSize,
+				PageCount:   1,
+				CreatedAt:   now,
+				UpdatedAt:   now,
+				Source:      d.Source,
+				Description: d.Description,
+				ImportedAt:  importedAt,
+				ExternalID:  d.ExternalID,
+			},
+			Content: DocumentContent{
+				Blocks: blocks,
+			},
+		}
+
+		// Save to SQLite
+		sqliteDoc := toSQLiteDocument(doc)
+		if err := s.db.SaveDocument(sqliteDoc); err != nil {
+			return docs, fmt.Errorf("save document: %w", err)
+		}
+
+		// Save tags
+		if len(d.Tags) > 0 {
+			if err := s.db.SaveDocumentTags(docID, d.Tags); err != nil {
+				return docs, fmt.Errorf("save tags: %w", err)
+			}
+		}
+
+		// Index for search (with deferred global stats)
+		sqliteBlocks := toSQLiteBlocks(doc)
+		if err := s.db.IndexDocumentWithOptions(docID, sqliteBlocks, true); err != nil {
+			return docs, fmt.Errorf("index document: %w", err)
+		}
+
+		// Generate embeddings unless deferred
+		if !idxCfg.DeferEmbedding && s.embedder != nil {
+			if err := s.embedDocumentUnlocked(doc); err != nil {
+				// Log warning but don't fail
+				fmt.Printf("warning: embedding failed for %s: %v\n", docID, err)
+			}
+		}
+
+		docs = append(docs, doc)
+	}
+
+	// Update global stats once at the end
+	if err := s.db.UpdateGlobalStats(); err != nil {
+		return docs, fmt.Errorf("update global stats: %w", err)
+	}
+
+	return docs, nil
 }
