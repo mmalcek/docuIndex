@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"image"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,7 +89,9 @@ func NewStore(basePath string, opts ...StoreOption) (*Store, error) {
 	return s, nil
 }
 
-// SetEmbeddingProvider configures the embedding provider after store creation
+// SetEmbeddingProvider configures the embedding provider after store creation.
+// It automatically detects and repairs inconsistencies between the HNSW index
+// and SQLite vectors, rebuilding the index if necessary.
 func (s *Store) SetEmbeddingProvider(provider embedding.Provider) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -98,15 +101,47 @@ func (s *Store) SetEmbeddingProvider(provider embedding.Provider) error {
 	// Set up vector search in hybrid searcher
 	s.hybrid.VectorSearch = s.vectorSearch
 
-	// Rebuild HNSW from stored vectors
+	// Load all vectors from SQLite (source of truth)
 	vectors, err := s.db.GetAllVectors()
 	if err != nil {
 		return fmt.Errorf("load vectors: %w", err)
 	}
 
+	// Check for inconsistency between HNSW and SQLite
+	hnswSize := s.hnsw.Size()
+	sqliteCount := len(vectors)
+
+	if hnswSize != sqliteCount {
+		// Log warning about inconsistency and auto-repair
+		log.Printf("warning: HNSW index (%d vectors) out of sync with SQLite (%d vectors), rebuilding...",
+			hnswSize, sqliteCount)
+
+		// Create fresh HNSW index with current config
+		var hnswCfg *vectorindex.Config
+		if s.config.HNSWConfig != nil {
+			hnswCfg = &vectorindex.Config{
+				M:        s.config.HNSWConfig.M,
+				EfConst:  s.config.HNSWConfig.EfConst,
+				EfSearch: s.config.HNSWConfig.EfSearch,
+			}
+		}
+		s.hnsw = vectorindex.NewHNSW(hnswCfg)
+	}
+
+	// Rebuild/populate HNSW from SQLite vectors
 	for _, v := range vectors {
 		id := fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID)
-		s.hnsw.Add(id, v.Vector)
+		if err := s.hnsw.Add(id, v.Vector); err != nil {
+			log.Printf("warning: failed to add vector %s to HNSW: %v", id, err)
+		}
+	}
+
+	// Save rebuilt HNSW to disk if there were changes
+	if s.hnsw.IsDirty() {
+		hnswPath := filepath.Join(s.config.BasePath, "hnsw.idx")
+		if err := s.hnsw.SaveToFile(hnswPath); err != nil {
+			log.Printf("warning: failed to save HNSW index: %v", err)
+		}
 	}
 
 	return nil
@@ -2619,6 +2654,270 @@ func (s *Store) EmbedPendingDocuments() error {
 			return fmt.Errorf("embed document %s: %w", info.ID, err)
 		}
 		s.mu.Unlock()
+	}
+
+	return nil
+}
+
+// GetDocumentsWithIncompleteEmbeddings returns documents that have some but not all blocks embedded.
+// This identifies documents where embedding was interrupted mid-way and need recovery.
+func (s *Store) GetDocumentsWithIncompleteEmbeddings() ([]*DocumentInfo, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	sqliteInfos, err := s.db.GetDocumentsWithIncompleteEmbeddings()
+	if err != nil {
+		return nil, err
+	}
+
+	return fromSQLiteDocumentInfos(sqliteInfos), nil
+}
+
+// ResumeEmbedding continues embedding for a document that was partially embedded.
+// Only embeds blocks that don't already have vectors, making it safe to call
+// on documents that were interrupted during embedding.
+func (s *Store) ResumeEmbedding(docID string) error {
+	if s.embedder == nil {
+		return fmt.Errorf("embedding provider not configured")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Get blocks that still need embedding
+	unembeddedBlocks, err := s.db.GetUnembeddedBlocks(docID)
+	if err != nil {
+		return fmt.Errorf("get unembedded blocks: %w", err)
+	}
+
+	if len(unembeddedBlocks) == 0 {
+		return nil // All blocks already embedded
+	}
+
+	// Collect texts and IDs for embedding
+	var texts []string
+	var blockIDs []string
+	for _, block := range unembeddedBlocks {
+		texts = append(texts, block.Content)
+		blockIDs = append(blockIDs, block.ID)
+	}
+
+	// Generate embeddings in batches
+	ctx := context.Background()
+	batchSize := s.embedder.MaxBatchSize()
+	var vectors []sqlite.VectorItem
+
+	for i := 0; i < len(texts); i += batchSize {
+		end := i + batchSize
+		if end > len(texts) {
+			end = len(texts)
+		}
+
+		embeddings, err := s.embedder.Embed(ctx, texts[i:end])
+		if err != nil {
+			// Save what we have so far before returning error
+			if len(vectors) > 0 {
+				s.db.SaveVectors(docID, vectors)
+				// Add to HNSW
+				for _, v := range vectors {
+					hnswID := fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID)
+					s.hnsw.Add(hnswID, v.Vector)
+				}
+			}
+			return fmt.Errorf("generate embeddings: %w", err)
+		}
+
+		for j, emb := range embeddings {
+			vectors = append(vectors, sqlite.VectorItem{
+				BlockID:    blockIDs[i+j],
+				DocumentID: docID,
+				Vector:     emb,
+				Text:       texts[i+j],
+				Model:      s.embedder.Name(),
+			})
+		}
+	}
+
+	// Save all vectors to SQLite
+	if err := s.db.SaveVectors(docID, vectors); err != nil {
+		return fmt.Errorf("save vectors: %w", err)
+	}
+
+	// Add to HNSW index
+	for _, v := range vectors {
+		hnswID := fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID)
+		if err := s.hnsw.Add(hnswID, v.Vector); err != nil {
+			log.Printf("warning: failed to add vector %s to HNSW: %v", hnswID, err)
+		}
+	}
+
+	// Save HNSW to disk
+	if s.hnsw.IsDirty() {
+		hnswPath := filepath.Join(s.config.BasePath, "hnsw.idx")
+		if err := s.hnsw.SaveToFile(hnswPath); err != nil {
+			log.Printf("warning: failed to save HNSW index: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// ResumeAllIncompleteEmbeddings resumes embedding for all documents with incomplete embeddings.
+// This is useful for recovering from crashes or interruptions during batch embedding.
+func (s *Store) ResumeAllIncompleteEmbeddings() error {
+	if s.embedder == nil {
+		return fmt.Errorf("embedding provider not configured")
+	}
+
+	// Get incomplete documents (no lock needed for read)
+	s.mu.RLock()
+	incomplete, err := s.db.GetDocumentsWithIncompleteEmbeddings()
+	s.mu.RUnlock()
+	if err != nil {
+		return fmt.Errorf("get incomplete documents: %w", err)
+	}
+
+	if len(incomplete) == 0 {
+		return nil
+	}
+
+	log.Printf("warning: found %d documents with incomplete embeddings, resuming...", len(incomplete))
+
+	// Resume each document
+	for _, doc := range incomplete {
+		if err := s.ResumeEmbedding(doc.ID); err != nil {
+			return fmt.Errorf("resume embedding for %s: %w", doc.ID, err)
+		}
+	}
+
+	return nil
+}
+
+// CheckHealth performs a comprehensive consistency check on the store.
+// It checks for HNSW-SQLite synchronization, incomplete embeddings, and other issues.
+func (s *Store) CheckHealth() (*StoreHealth, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	health := &StoreHealth{}
+
+	// Get document and block counts
+	docCount, err := s.db.GetDocumentCount()
+	if err != nil {
+		return nil, fmt.Errorf("get document count: %w", err)
+	}
+	health.DocumentCount = docCount
+
+	blockCount, err := s.db.GetBlockCount()
+	if err != nil {
+		return nil, fmt.Errorf("get block count: %w", err)
+	}
+	health.BlockCount = blockCount
+
+	// Check HNSW vs SQLite vector sync
+	vectorCount, err := s.db.GetVectorCount()
+	if err != nil {
+		return nil, fmt.Errorf("get vector count: %w", err)
+	}
+	health.HNSWSize = s.hnsw.Size()
+	health.SQLiteVectorCount = vectorCount
+	health.HNSWSynced = health.HNSWSize == health.SQLiteVectorCount
+
+	// Get documents with incomplete embeddings
+	incomplete, err := s.db.GetDocumentsWithIncompleteEmbeddings()
+	if err != nil {
+		return nil, fmt.Errorf("get incomplete embeddings: %w", err)
+	}
+	for _, doc := range incomplete {
+		health.IncompleteEmbeddings = append(health.IncompleteEmbeddings, doc.ID)
+	}
+
+	// Get documents pending embeddings
+	pending, err := s.db.GetDocumentsWithoutEmbeddings()
+	if err != nil {
+		return nil, fmt.Errorf("get pending embeddings: %w", err)
+	}
+	for _, doc := range pending {
+		health.PendingEmbeddings = append(health.PendingEmbeddings, doc.ID)
+	}
+
+	// Determine overall health
+	health.IsHealthy = health.HNSWSynced && len(health.IncompleteEmbeddings) == 0
+
+	return health, nil
+}
+
+// Repair fixes detected inconsistencies in the store.
+// It rebuilds the HNSW index from SQLite and resumes incomplete embeddings.
+// Returns nil if no repairs were needed or all repairs succeeded.
+func (s *Store) Repair() error {
+	// First check health to see what needs fixing
+	health, err := s.CheckHealth()
+	if err != nil {
+		return fmt.Errorf("check health: %w", err)
+	}
+
+	if health.IsHealthy {
+		return nil // Nothing to repair
+	}
+
+	// Fix HNSW-SQLite desync if needed
+	if !health.HNSWSynced {
+		log.Printf("warning: HNSW index out of sync (%d vs %d vectors), rebuilding...",
+			health.HNSWSize, health.SQLiteVectorCount)
+
+		s.mu.Lock()
+		// Get all vectors from SQLite
+		vectors, err := s.db.GetAllVectors()
+		if err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("get all vectors: %w", err)
+		}
+
+		// Create fresh HNSW index
+		var hnswCfg *vectorindex.Config
+		if s.config.HNSWConfig != nil {
+			hnswCfg = &vectorindex.Config{
+				M:        s.config.HNSWConfig.M,
+				EfConst:  s.config.HNSWConfig.EfConst,
+				EfSearch: s.config.HNSWConfig.EfSearch,
+			}
+		}
+		s.hnsw = vectorindex.NewHNSW(hnswCfg)
+
+		// Rebuild from SQLite
+		for _, v := range vectors {
+			id := fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID)
+			if err := s.hnsw.Add(id, v.Vector); err != nil {
+				log.Printf("warning: failed to add vector %s to HNSW: %v", id, err)
+			}
+		}
+
+		// Save rebuilt index
+		if s.hnsw.IsDirty() {
+			hnswPath := filepath.Join(s.config.BasePath, "hnsw.idx")
+			if err := s.hnsw.SaveToFile(hnswPath); err != nil {
+				log.Printf("warning: failed to save HNSW index: %v", err)
+			}
+		}
+		s.mu.Unlock()
+
+		log.Printf("info: HNSW index rebuilt with %d vectors", len(vectors))
+	}
+
+	// Resume incomplete embeddings if embedder is available
+	if s.embedder != nil && len(health.IncompleteEmbeddings) > 0 {
+		log.Printf("warning: resuming %d documents with incomplete embeddings...",
+			len(health.IncompleteEmbeddings))
+
+		for _, docID := range health.IncompleteEmbeddings {
+			if err := s.ResumeEmbedding(docID); err != nil {
+				return fmt.Errorf("resume embedding for %s: %w", docID, err)
+			}
+		}
+
+		log.Printf("info: completed embedding recovery for %d documents",
+			len(health.IncompleteEmbeddings))
 	}
 
 	return nil

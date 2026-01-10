@@ -230,6 +230,7 @@ CREATE TABLE document_tags (
 | `DatabaseInfo` | Database schema info (SchemaVersion, LibraryVersion, CreatedAt, LastMigration) |
 | `AccessToken` | Azure access token with expiry time |
 | `HNSWConfig` | HNSW vector index configuration (M, EfConst, EfSearch) |
+| `StoreHealth` | Health check results (HNSWSynced, IncompleteEmbeddings, PendingEmbeddings, counts) |
 
 ## Public API
 
@@ -434,6 +435,29 @@ err := store.EmbedDocuments(docID1, docID2, ...)
 
 // Embed ALL documents that don't have embeddings yet
 err := store.EmbedPendingDocuments()
+
+// === Recovery & Health Check APIs ===
+
+// Check store health (HNSW-SQLite sync, incomplete embeddings, etc.)
+health, err := store.CheckHealth()
+// health.IsHealthy            - true if all checks pass
+// health.HNSWSize             - vectors in HNSW index
+// health.SQLiteVectorCount    - vectors in SQLite
+// health.HNSWSynced           - true if counts match
+// health.IncompleteEmbeddings - doc IDs with partial embeddings
+// health.PendingEmbeddings    - doc IDs without any embeddings
+
+// Get documents with partial embeddings (interrupted during embedding)
+incomplete, err := store.GetDocumentsWithIncompleteEmbeddings()
+
+// Resume embedding for a specific document (only embeds missing blocks)
+err := store.ResumeEmbedding(docID)
+
+// Resume all incomplete embeddings (useful after crash recovery)
+err := store.ResumeAllIncompleteEmbeddings()
+
+// Repair all detected issues (rebuilds HNSW, resumes embeddings)
+err := store.Repair()
 ```
 
 ## Configuration Options
@@ -679,6 +703,11 @@ go run main.go detect-intent "summarize this"  # Detect query intent type
 | Configure HNSW parameters | `options.go` WithHNSWConfig() |
 | Find unprocessed documents | `docuindex.go` GetDocumentsWithoutEmbeddings() |
 | Batch embed documents | `docuindex.go` EmbedPendingDocuments(), EmbedDocuments() |
+| Check store health | `docuindex.go` CheckHealth() |
+| Repair store issues | `docuindex.go` Repair() |
+| Find incomplete embeddings | `docuindex.go` GetDocumentsWithIncompleteEmbeddings() |
+| Resume interrupted embedding | `docuindex.go` ResumeEmbedding(), ResumeAllIncompleteEmbeddings() |
+| Get unembedded blocks | `sqlite/vectors.go` GetUnembeddedBlocks() |
 
 ## Dependencies
 

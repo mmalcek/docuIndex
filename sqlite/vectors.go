@@ -189,6 +189,75 @@ func (s *Store) GetVectorCountForDocument(documentID string) (int, error) {
 	return count, nil
 }
 
+// GetEmbeddedBlockIDs returns block IDs that have vectors for a document
+func (s *Store) GetEmbeddedBlockIDs(documentID string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`SELECT block_id FROM vectors WHERE document_id = ?`, documentID)
+	if err != nil {
+		return nil, fmt.Errorf("query embedded blocks: %w", err)
+	}
+	defer rows.Close()
+
+	var blockIDs []string
+	for rows.Next() {
+		var blockID string
+		if err := rows.Scan(&blockID); err != nil {
+			return nil, fmt.Errorf("scan block ID: %w", err)
+		}
+		blockIDs = append(blockIDs, blockID)
+	}
+
+	return blockIDs, rows.Err()
+}
+
+// UnembeddedBlock represents a content block that should have an embedding but doesn't
+type UnembeddedBlock struct {
+	ID         string
+	DocumentID string
+	Type       string
+	Content    string
+	Page       int
+	Sequence   int
+}
+
+// GetUnembeddedBlocks returns blocks that should have embeddings but don't
+func (s *Store) GetUnembeddedBlocks(documentID string) ([]UnembeddedBlock, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	query := `
+		SELECT cb.id, cb.document_id, cb.type, cb.content, cb.page, cb.sequence
+		FROM content_blocks cb
+		WHERE cb.document_id = ?
+		AND cb.type IN ('text', 'heading', 'custom')
+		AND cb.content IS NOT NULL AND cb.content != ''
+		AND NOT EXISTS (
+			SELECT 1 FROM vectors v
+			WHERE v.document_id = cb.document_id AND v.block_id = cb.id
+		)
+		ORDER BY cb.sequence
+	`
+
+	rows, err := s.db.Query(query, documentID)
+	if err != nil {
+		return nil, fmt.Errorf("query unembedded blocks: %w", err)
+	}
+	defer rows.Close()
+
+	var blocks []UnembeddedBlock
+	for rows.Next() {
+		var b UnembeddedBlock
+		if err := rows.Scan(&b.ID, &b.DocumentID, &b.Type, &b.Content, &b.Page, &b.Sequence); err != nil {
+			return nil, fmt.Errorf("scan unembedded block: %w", err)
+		}
+		blocks = append(blocks, b)
+	}
+
+	return blocks, rows.Err()
+}
+
 // VectorInfo contains metadata about vectors for a document
 type VectorInfo struct {
 	Count       int

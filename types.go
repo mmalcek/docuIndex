@@ -376,3 +376,15 @@ type DatabaseInfo struct {
 	CreatedAt      time.Time `json:"created_at"`      // When database was created
 	LastMigration  time.Time `json:"last_migration"`  // When last migration was applied
 }
+
+// StoreHealth contains consistency check results for diagnosing store issues
+type StoreHealth struct {
+	IsHealthy             bool     `json:"is_healthy"`              // True if all checks pass
+	HNSWSize              int      `json:"hnsw_size"`               // Number of vectors in HNSW index
+	SQLiteVectorCount     int      `json:"sqlite_vector_count"`     // Number of vectors in SQLite
+	HNSWSynced            bool     `json:"hnsw_synced"`             // True if HNSW matches SQLite
+	IncompleteEmbeddings  []string `json:"incomplete_embeddings"`   // Document IDs with partial embeddings
+	PendingEmbeddings     []string `json:"pending_embeddings"`      // Document IDs without any embeddings
+	DocumentCount         int      `json:"document_count"`          // Total number of documents
+	BlockCount            int      `json:"block_count"`             // Total number of content blocks
+}

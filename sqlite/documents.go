@@ -399,3 +399,81 @@ func (s *Store) GetDocumentsWithoutEmbeddings() ([]DocumentInfo, error) {
 
 	return docs, rows.Err()
 }
+
+// GetDocumentsWithIncompleteEmbeddings returns documents that have some but not all blocks embedded.
+// This identifies documents where embedding was interrupted mid-way.
+func (s *Store) GetDocumentsWithIncompleteEmbeddings() ([]DocumentInfo, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Find documents where:
+	// 1. At least one embeddable block exists without a vector
+	// 2. At least one vector already exists (so it's not a fully unembedded doc)
+	query := `
+		SELECT DISTINCT d.id, d.name, d.original_path, d.format, d.size_bytes, d.page_count,
+		       d.checksum, d.created_at, d.updated_at, d.source, d.description, d.imported_at, d.external_id
+		FROM documents d
+		WHERE EXISTS (
+			SELECT 1 FROM content_blocks cb
+			WHERE cb.document_id = d.id
+			AND cb.type IN ('text', 'heading', 'custom')
+			AND cb.content IS NOT NULL AND cb.content != ''
+			AND NOT EXISTS (
+				SELECT 1 FROM vectors v
+				WHERE v.document_id = d.id AND v.block_id = cb.id
+			)
+		)
+		AND EXISTS (
+			SELECT 1 FROM vectors v WHERE v.document_id = d.id
+		)
+		ORDER BY d.updated_at DESC
+	`
+
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("query incomplete embeddings: %w", err)
+	}
+	defer rows.Close()
+
+	var docs []DocumentInfo
+	for rows.Next() {
+		var doc DocumentInfo
+		var originalPath, checksum sql.NullString
+		var source, description, importedAt, externalID sql.NullString
+		var createdAt, updatedAt string
+
+		err := rows.Scan(
+			&doc.ID,
+			&doc.Name,
+			&originalPath,
+			&doc.Format,
+			&doc.SizeBytes,
+			&doc.PageCount,
+			&checksum,
+			&createdAt,
+			&updatedAt,
+			&source,
+			&description,
+			&importedAt,
+			&externalID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan document: %w", err)
+		}
+
+		doc.OriginalPath = originalPath.String
+		doc.Checksum = checksum.String
+		doc.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		doc.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+		doc.Source = source.String
+		doc.Description = description.String
+		doc.ExternalID = externalID.String
+		if importedAt.String != "" {
+			doc.ImportedAt, _ = time.Parse(time.RFC3339, importedAt.String)
+		}
+
+		docs = append(docs, doc)
+	}
+
+	return docs, rows.Err()
+}

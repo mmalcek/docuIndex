@@ -123,6 +123,8 @@ func (h *HNSW) Add(id string, vector []float32) error {
 		h.nodes[id] = newNode
 		h.entryID = id
 		h.maxLevel = level
+		h.isDirty = true
+		h.pendingAdds++
 		return nil
 	}
 

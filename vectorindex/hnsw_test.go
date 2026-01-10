@@ -342,26 +342,32 @@ func TestDirtyTracking(t *testing.T) {
 		t.Error("new index should not be dirty")
 	}
 
-	// Add first vector (becomes entry point)
+	// Add first vector (becomes entry point) - should now track dirty state
 	h.Add("v1", []float32{1.0, 0.0, 0.0})
 
-	// Add second vector - this one triggers the full add path with dirty tracking
-	h.Add("v2", []float32{0.0, 1.0, 0.0})
-
+	// First node should now be tracked as dirty (entry point fix)
 	if !h.IsDirty() {
-		t.Error("index should be dirty after add")
+		t.Error("index should be dirty after adding first node (entry point)")
 	}
 
 	adds, deletes := h.PendingChanges()
-	if adds < 1 {
-		t.Errorf("expected at least 1 add, got %d adds", adds)
+	if adds != 1 {
+		t.Errorf("expected 1 add after first node, got %d adds", adds)
+	}
+
+	// Add second vector
+	h.Add("v2", []float32{0.0, 1.0, 0.0})
+
+	adds, deletes = h.PendingChanges()
+	if adds != 2 {
+		t.Errorf("expected 2 adds after second node, got %d adds", adds)
 	}
 
 	h.Delete("v1")
 
-	_, deletes = h.PendingChanges()
-	if deletes < 1 {
-		t.Errorf("expected at least 1 delete, got %d deletes", deletes)
+	adds, deletes = h.PendingChanges()
+	if deletes != 1 {
+		t.Errorf("expected 1 delete, got %d deletes", deletes)
 	}
 
 	h.MarkClean()
@@ -373,6 +379,54 @@ func TestDirtyTracking(t *testing.T) {
 	adds, deletes = h.PendingChanges()
 	if adds != 0 || deletes != 0 {
 		t.Errorf("expected 0 adds, 0 deletes after MarkClean, got %d adds, %d deletes", adds, deletes)
+	}
+}
+
+// TestEntryPointDirtyTracking specifically tests that the first node (entry point) is tracked
+func TestEntryPointDirtyTracking(t *testing.T) {
+	h := NewHNSW(nil)
+
+	// Verify clean state
+	if h.IsDirty() {
+		t.Error("new index should not be dirty")
+	}
+
+	adds, _ := h.PendingChanges()
+	if adds != 0 {
+		t.Errorf("new index should have 0 pending adds, got %d", adds)
+	}
+
+	// Add single node - this becomes entry point
+	err := h.Add("entry", []float32{1.0, 2.0, 3.0})
+	if err != nil {
+		t.Fatalf("failed to add entry point: %v", err)
+	}
+
+	// Entry point should trigger dirty tracking
+	if !h.IsDirty() {
+		t.Error("index should be dirty after adding entry point node")
+	}
+
+	adds, _ = h.PendingChanges()
+	if adds != 1 {
+		t.Errorf("expected 1 pending add for entry point, got %d", adds)
+	}
+
+	// Save and verify clean state
+	tmpDir := t.TempDir()
+	indexPath := filepath.Join(tmpDir, "entry_test.idx")
+	err = h.SaveToFile(indexPath)
+	if err != nil {
+		t.Fatalf("failed to save: %v", err)
+	}
+
+	if h.IsDirty() {
+		t.Error("index should not be dirty after save")
+	}
+
+	// Verify file was created (single node was persisted)
+	if _, err := os.Stat(indexPath); os.IsNotExist(err) {
+		t.Error("index file should exist after save")
 	}
 }
 
@@ -393,19 +447,17 @@ func TestSaveIfDirty(t *testing.T) {
 		t.Error("file should not exist when index is not dirty")
 	}
 
-	// Add first vector (entry point) - note: dirty tracking only happens on second+ adds
+	// Add first vector (entry point) - now properly triggers dirty flag
 	h.Add("v1", []float32{1.0, 0.0, 0.0})
-	// Add second vector to trigger dirty flag
-	h.Add("v2", []float32{0.0, 1.0, 0.0})
 
-	// Now should save
+	// Should save now (even single node triggers dirty with fix)
 	err = h.SaveIfDirty(indexPath)
 	if err != nil {
 		t.Fatalf("SaveIfDirty failed: %v", err)
 	}
 
 	if _, err := os.Stat(indexPath); os.IsNotExist(err) {
-		t.Error("file should exist after SaveIfDirty on dirty index")
+		t.Error("file should exist after SaveIfDirty on dirty index (single node)")
 	}
 }
 
