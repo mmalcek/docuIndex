@@ -131,7 +131,10 @@ func (h *HNSW) Add(id string, vector []float32) error {
 
 	// Traverse from top level down to level+1
 	for lc := h.maxLevel; lc > level; lc-- {
-		currID = h.searchLayer(vector, currID, 1, lc)[0].ID
+		results := h.searchLayer(vector, currID, 1, lc)
+		if len(results) > 0 {
+			currID = results[0].ID
+		}
 	}
 
 	// Insert at each level from level down to 0
@@ -293,7 +296,10 @@ func (h *HNSW) addUnlocked(id string, vector []float32) error {
 
 	// Traverse from top level down to level+1
 	for lc := h.maxLevel; lc > level; lc-- {
-		currID = h.searchLayer(vector, currID, 1, lc)[0].ID
+		results := h.searchLayer(vector, currID, 1, lc)
+		if len(results) > 0 {
+			currID = results[0].ID
+		}
 	}
 
 	// Insert at each level from level down to 0
