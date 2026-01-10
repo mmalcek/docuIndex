@@ -3239,15 +3239,16 @@ func (s *Store) IndexCustomDataBatch(data []*CustomData, opts ...IndexOption) ([
 		// Convert entries to blocks
 		var blocks []ContentBlock
 		var totalSize int64
+		var pendingImages []pendingImage
 
 		for i, entry := range d.Entries {
-			blockID := entry.ID
-			if blockID == "" {
-				blockID = fmt.Sprintf("entry_%d", i)
+			entryID := entry.ID
+			if entryID == "" {
+				entryID = fmt.Sprintf("entry_%d", i)
 			}
 
 			block := ContentBlock{
-				ID:      blockID,
+				ID:      entryID,
 				Type:    BlockTypeCustom,
 				Content: entry.Content,
 				Page:    1,
@@ -3258,6 +3259,98 @@ func (s *Store) IndexCustomDataBatch(data []*CustomData, opts ...IndexOption) ([
 
 			blocks = append(blocks, block)
 			totalSize += int64(len(entry.Content))
+
+			// Process entry-level images
+			for j, img := range entry.Images {
+				if len(img.Data) == 0 || !isValidImageFormat(img.Format) {
+					continue
+				}
+
+				imgID := uuid.New().String()
+				format := normalizeImageFormat(img.Format)
+
+				// Auto-detect dimensions if not provided
+				width, height := img.Width, img.Height
+				if width == 0 || height == 0 {
+					if w, h, err := detectImageDimensions(img.Data); err == nil {
+						width, height = w, h
+					}
+				}
+
+				name := img.OriginalName
+				if name == "" {
+					name = fmt.Sprintf("image_%d.%s", j+1, format)
+				}
+
+				// Add image block
+				blocks = append(blocks, ContentBlock{
+					ID:   imgID,
+					Type: BlockTypeImage,
+					Page: 1,
+					Semantic: SemanticInfo{
+						Section: d.Source,
+					},
+				})
+
+				// Queue image for saving after document exists
+				pendingImages = append(pendingImages, pendingImage{
+					Data:        img.Data,
+					Format:      format,
+					Width:       width,
+					Height:      height,
+					Page:        1,
+					Name:        name,
+					BlockIndex:  len(blocks) - 1, // Index of the image block just added
+					BlockID:     entryID,         // Link to parent entry
+					Description: img.Description,
+				})
+			}
+		}
+
+		// Process document-level images
+		for j, img := range d.Images {
+			if len(img.Data) == 0 || !isValidImageFormat(img.Format) {
+				continue
+			}
+
+			imgID := uuid.New().String()
+			format := normalizeImageFormat(img.Format)
+
+			// Auto-detect dimensions if not provided
+			width, height := img.Width, img.Height
+			if width == 0 || height == 0 {
+				if w, h, err := detectImageDimensions(img.Data); err == nil {
+					width, height = w, h
+				}
+			}
+
+			name := img.OriginalName
+			if name == "" {
+				name = fmt.Sprintf("doc_image_%d.%s", j+1, format)
+			}
+
+			// Add image block
+			blocks = append(blocks, ContentBlock{
+				ID:   imgID,
+				Type: BlockTypeImage,
+				Page: 1,
+				Semantic: SemanticInfo{
+					Section: d.Source,
+				},
+			})
+
+			// Queue image for saving after document exists
+			pendingImages = append(pendingImages, pendingImage{
+				Data:        img.Data,
+				Format:      format,
+				Width:       width,
+				Height:      height,
+				Page:        1,
+				Name:        name,
+				BlockIndex:  len(blocks) - 1, // Index of the image block just added
+				BlockID:     "",              // No parent entry for document-level images
+				Description: img.Description,
+			})
 		}
 
 		// Create document
@@ -3296,6 +3389,23 @@ func (s *Store) IndexCustomDataBatch(data []*CustomData, opts ...IndexOption) ([
 		if len(d.Tags) > 0 {
 			if err := s.db.SaveDocumentTags(docID, d.Tags); err != nil {
 				return docs, fmt.Errorf("save tags: %w", err)
+			}
+		}
+
+		// Save images (after document exists in DB)
+		for _, img := range pendingImages {
+			blockID := img.BlockID
+			if blockID == "" && img.BlockIndex >= 0 && img.BlockIndex < len(doc.Content.Blocks) {
+				blockID = doc.Content.Blocks[img.BlockIndex].ID
+			}
+			imageID, err := s.db.SaveImage(doc.Info.ID, img.Data, img.Format, img.Width, img.Height, img.Page, img.Name, blockID, img.Description)
+			if err != nil {
+				fmt.Printf("warning: failed to save image %s: %v\n", img.Name, err)
+				continue
+			}
+			// Update content block reference
+			if img.BlockIndex >= 0 && img.BlockIndex < len(doc.Content.Blocks) {
+				doc.Content.Blocks[img.BlockIndex].Content = fmt.Sprintf("images/%s", imageID)
 			}
 		}
 
