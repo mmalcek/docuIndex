@@ -101,6 +101,26 @@ type DedupResult struct {
 	Method       string  `json:"method"` // "checksum", "content_hash", "embedding"
 }
 
+// BackgroundEmbeddingStatus represents the status of background HNSW building
+type BackgroundEmbeddingStatus struct {
+	Running        bool          `json:"running"`         // Is background build in progress
+	StartedAt      time.Time     `json:"started_at"`      // When build started
+	DocumentsTotal int           `json:"documents_total"` // Total documents to process
+	DocumentsDone  int           `json:"documents_done"`  // Documents processed so far
+	CurrentDocID   string        `json:"current_doc_id"`  // Currently processing document
+	CurrentDocName string        `json:"current_doc_name"`
+	ElapsedTime    time.Duration `json:"elapsed_time"`
+	Error          error         `json:"error,omitempty"` // Error if failed
+}
+
+// Progress returns the completion percentage (0-100)
+func (s BackgroundEmbeddingStatus) Progress() float64 {
+	if s.DocumentsTotal == 0 {
+		return 0
+	}
+	return float64(s.DocumentsDone) / float64(s.DocumentsTotal) * 100
+}
+
 // DateRange represents a time range for filtering
 type DateRange struct {
 	Start time.Time `json:"start"`

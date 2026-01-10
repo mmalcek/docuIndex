@@ -36,6 +36,13 @@ type Store struct {
 	hnsw     *vectorindex.HNSW
 	embedder embedding.Provider
 	hybrid   *hsearch.HybridSearcher
+
+	// Background embedding state
+	bgMu      sync.Mutex
+	bgRunning bool
+	bgCancel  context.CancelFunc
+	bgStatus  BackgroundEmbeddingStatus
+	bgDone    chan struct{}
 }
 
 // NewStore creates a new document store at the specified path using SQLite
@@ -128,23 +135,22 @@ func (s *Store) SetEmbeddingProvider(provider embedding.Provider) error {
 		s.hnsw = vectorindex.NewHNSW(hnswCfg)
 	}
 
-	// Rebuild/populate HNSW from SQLite vectors
-	for _, v := range vectors {
-		id := fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID)
-		if err := s.hnsw.Add(id, v.Vector); err != nil {
-			log.Printf("warning: failed to add vector %s to HNSW: %v", id, err)
+	// Rebuild/populate HNSW from SQLite vectors using batch operation
+	if len(vectors) > 0 {
+		hnswItems := make([]vectorindex.VectorItem, len(vectors))
+		for i, v := range vectors {
+			hnswItems[i] = vectorindex.VectorItem{
+				ID:     fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID),
+				Vector: v.Vector,
+			}
+		}
+		if err := s.hnsw.AddBatch(hnswItems); err != nil {
+			log.Printf("warning: failed to add vectors to HNSW: %v", err)
 		}
 	}
 
 	// Save rebuilt HNSW to disk if there were changes
-	if s.hnsw.IsDirty() {
-		hnswPath := filepath.Join(s.config.BasePath, "hnsw.idx")
-		if err := s.hnsw.SaveToFile(hnswPath); err != nil {
-			log.Printf("warning: failed to save HNSW index: %v", err)
-		}
-	}
-
-	return nil
+	return s.saveHNSWIndex()
 }
 
 // pendingImage holds image data to be saved after document creation
@@ -313,10 +319,16 @@ func (s *Store) embedDocument(doc *Document) error {
 		return fmt.Errorf("save vectors: %w", err)
 	}
 
-	// Add to HNSW index
-	for _, v := range vectors {
-		id := fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID)
-		s.hnsw.Add(id, v.Vector)
+	// Add to HNSW index using batch operation
+	hnswItems := make([]vectorindex.VectorItem, len(vectors))
+	for i, v := range vectors {
+		hnswItems[i] = vectorindex.VectorItem{
+			ID:     fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID),
+			Vector: v.Vector,
+		}
+	}
+	if err := s.hnsw.AddBatch(hnswItems); err != nil {
+		return fmt.Errorf("add vectors to HNSW: %w", err)
 	}
 
 	// Persist HNSW index
@@ -1999,10 +2011,16 @@ func (s *Store) embedDocumentWithProgress(doc *Document, callback ProgressCallba
 		return fmt.Errorf("save vectors: %w", err)
 	}
 
-	// Add to HNSW index
-	for _, v := range vectors {
-		id := fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID)
-		s.hnsw.Add(id, v.Vector)
+	// Add to HNSW index using batch operation
+	hnswItems := make([]vectorindex.VectorItem, len(vectors))
+	for i, v := range vectors {
+		hnswItems[i] = vectorindex.VectorItem{
+			ID:     fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID),
+			Vector: v.Vector,
+		}
+	}
+	if err := s.hnsw.AddBatch(hnswItems); err != nil {
+		return fmt.Errorf("add vectors to HNSW: %w", err)
 	}
 
 	// Persist HNSW index
@@ -2573,6 +2591,7 @@ func (s *Store) GetDocumentsWithoutEmbeddings() ([]*DocumentInfo, error) {
 
 // EmbedDocuments generates embeddings for specific documents by ID.
 // This is useful for resumable batch processing.
+// OPTIMIZED: Saves HNSW index only once at the end instead of after each document.
 func (s *Store) EmbedDocuments(docIDs ...string) error {
 	if s.embedder == nil {
 		return fmt.Errorf("embedding provider not configured")
@@ -2607,11 +2626,13 @@ func (s *Store) EmbedDocuments(docIDs ...string) error {
 		}
 	}
 
-	return nil
+	// Save HNSW index ONCE after all documents processed
+	return s.saveHNSWIndex()
 }
 
 // EmbedPendingDocuments generates embeddings for all documents that don't have them yet.
 // This is the main method for deferred embedding patterns.
+// OPTIMIZED: Saves HNSW index only once at the end instead of after each document.
 func (s *Store) EmbedPendingDocuments() error {
 	if s.embedder == nil {
 		return fmt.Errorf("embedding provider not configured")
@@ -2656,7 +2677,177 @@ func (s *Store) EmbedPendingDocuments() error {
 		s.mu.Unlock()
 	}
 
+	// Save HNSW index ONCE after all documents processed
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.saveHNSWIndex()
+}
+
+// EmbedPendingDocumentsAsync starts embedding in background.
+// Returns immediately. Use GetBackgroundStatus() to check progress,
+// IsBackgroundRunning() to check if still running, or WaitForBackground() to block.
+func (s *Store) EmbedPendingDocumentsAsync() error {
+	s.bgMu.Lock()
+	defer s.bgMu.Unlock()
+
+	if s.bgRunning {
+		return fmt.Errorf("background embedding already running")
+	}
+
+	if s.embedder == nil {
+		return fmt.Errorf("embedding provider not configured")
+	}
+
+	// Get pending documents count
+	s.mu.RLock()
+	pending, err := s.db.GetDocumentsWithoutEmbeddings()
+	s.mu.RUnlock()
+	if err != nil {
+		return fmt.Errorf("get pending documents: %w", err)
+	}
+
+	if len(pending) == 0 {
+		return nil // Nothing to do
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s.bgCancel = cancel
+	s.bgRunning = true
+	s.bgDone = make(chan struct{})
+	s.bgStatus = BackgroundEmbeddingStatus{
+		Running:        true,
+		StartedAt:      time.Now(),
+		DocumentsTotal: len(pending),
+	}
+
+	go s.runBackgroundEmbedding(ctx, pending)
+
 	return nil
+}
+
+// runBackgroundEmbedding is the background goroutine for embedding
+func (s *Store) runBackgroundEmbedding(ctx context.Context, pending []sqlite.DocumentInfo) {
+	defer func() {
+		s.bgMu.Lock()
+		s.bgRunning = false
+		s.bgStatus.Running = false
+		s.bgStatus.ElapsedTime = time.Since(s.bgStatus.StartedAt)
+		close(s.bgDone)
+		s.bgMu.Unlock()
+	}()
+
+	for i, info := range pending {
+		select {
+		case <-ctx.Done():
+			s.bgMu.Lock()
+			s.bgStatus.Error = ctx.Err()
+			s.bgMu.Unlock()
+			return
+		default:
+		}
+
+		// Update status
+		s.bgMu.Lock()
+		s.bgStatus.CurrentDocID = info.ID
+		s.bgStatus.CurrentDocName = info.Name
+		s.bgStatus.ElapsedTime = time.Since(s.bgStatus.StartedAt)
+		s.bgMu.Unlock()
+
+		s.mu.Lock()
+		doc, err := s.db.GetDocument(info.ID)
+		if err != nil {
+			s.mu.Unlock()
+			s.bgMu.Lock()
+			s.bgStatus.Error = fmt.Errorf("get document %s: %w", info.ID, err)
+			s.bgMu.Unlock()
+			return
+		}
+
+		mainDoc := &Document{
+			Info: DocumentInfo{
+				ID:   doc.Info.ID,
+				Name: doc.Info.Name,
+			},
+			Content: DocumentContent{
+				Blocks: fromSQLiteBlocks(doc.Blocks),
+			},
+		}
+
+		if err := s.embedDocumentUnlocked(mainDoc); err != nil {
+			s.mu.Unlock()
+			s.bgMu.Lock()
+			s.bgStatus.Error = fmt.Errorf("embed document %s: %w", info.ID, err)
+			s.bgMu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+
+		// Update progress
+		s.bgMu.Lock()
+		s.bgStatus.DocumentsDone = i + 1
+		s.bgStatus.ElapsedTime = time.Since(s.bgStatus.StartedAt)
+		s.bgMu.Unlock()
+	}
+
+	// Final save
+	s.mu.Lock()
+	if err := s.saveHNSWIndex(); err != nil {
+		s.bgMu.Lock()
+		s.bgStatus.Error = fmt.Errorf("save HNSW index: %w", err)
+		s.bgMu.Unlock()
+	}
+	s.mu.Unlock()
+}
+
+// GetBackgroundStatus returns the current status of background embedding.
+// Safe to call even when no background operation is running.
+func (s *Store) GetBackgroundStatus() BackgroundEmbeddingStatus {
+	s.bgMu.Lock()
+	defer s.bgMu.Unlock()
+	status := s.bgStatus
+	if status.Running {
+		status.ElapsedTime = time.Since(status.StartedAt)
+	}
+	return status
+}
+
+// IsBackgroundRunning returns true if background embedding is in progress.
+func (s *Store) IsBackgroundRunning() bool {
+	s.bgMu.Lock()
+	defer s.bgMu.Unlock()
+	return s.bgRunning
+}
+
+// WaitForBackground blocks until background embedding completes.
+// Returns the error from background embedding if any, or nil if successful.
+// Returns nil immediately if no background operation is running.
+func (s *Store) WaitForBackground() error {
+	s.bgMu.Lock()
+	if !s.bgRunning {
+		err := s.bgStatus.Error
+		s.bgMu.Unlock()
+		return err
+	}
+	done := s.bgDone
+	s.bgMu.Unlock()
+
+	<-done
+
+	s.bgMu.Lock()
+	err := s.bgStatus.Error
+	s.bgMu.Unlock()
+	return err
+}
+
+// CancelBackground cancels background embedding if running.
+// The operation will stop after the current document completes.
+func (s *Store) CancelBackground() {
+	s.bgMu.Lock()
+	defer s.bgMu.Unlock()
+
+	if s.bgCancel != nil {
+		s.bgCancel()
+	}
 }
 
 // GetDocumentsWithIncompleteEmbeddings returns documents that have some but not all blocks embedded.
@@ -2718,11 +2909,15 @@ func (s *Store) ResumeEmbedding(docID string) error {
 			// Save what we have so far before returning error
 			if len(vectors) > 0 {
 				s.db.SaveVectors(docID, vectors)
-				// Add to HNSW
-				for _, v := range vectors {
-					hnswID := fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID)
-					s.hnsw.Add(hnswID, v.Vector)
+				// Add to HNSW using batch operation
+				hnswItems := make([]vectorindex.VectorItem, len(vectors))
+				for i, v := range vectors {
+					hnswItems[i] = vectorindex.VectorItem{
+						ID:     fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID),
+						Vector: v.Vector,
+					}
 				}
+				s.hnsw.AddBatch(hnswItems)
 			}
 			return fmt.Errorf("generate embeddings: %w", err)
 		}
@@ -2743,23 +2938,20 @@ func (s *Store) ResumeEmbedding(docID string) error {
 		return fmt.Errorf("save vectors: %w", err)
 	}
 
-	// Add to HNSW index
-	for _, v := range vectors {
-		hnswID := fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID)
-		if err := s.hnsw.Add(hnswID, v.Vector); err != nil {
-			log.Printf("warning: failed to add vector %s to HNSW: %v", hnswID, err)
+	// Add to HNSW index using batch operation
+	hnswItems := make([]vectorindex.VectorItem, len(vectors))
+	for i, v := range vectors {
+		hnswItems[i] = vectorindex.VectorItem{
+			ID:     fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID),
+			Vector: v.Vector,
 		}
+	}
+	if err := s.hnsw.AddBatch(hnswItems); err != nil {
+		log.Printf("warning: failed to add vectors to HNSW: %v", err)
 	}
 
 	// Save HNSW to disk
-	if s.hnsw.IsDirty() {
-		hnswPath := filepath.Join(s.config.BasePath, "hnsw.idx")
-		if err := s.hnsw.SaveToFile(hnswPath); err != nil {
-			log.Printf("warning: failed to save HNSW index: %v", err)
-		}
-	}
-
-	return nil
+	return s.saveHNSWIndex()
 }
 
 // ResumeAllIncompleteEmbeddings resumes embedding for all documents with incomplete embeddings.
@@ -2885,20 +3077,23 @@ func (s *Store) Repair() error {
 		}
 		s.hnsw = vectorindex.NewHNSW(hnswCfg)
 
-		// Rebuild from SQLite
-		for _, v := range vectors {
-			id := fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID)
-			if err := s.hnsw.Add(id, v.Vector); err != nil {
-				log.Printf("warning: failed to add vector %s to HNSW: %v", id, err)
+		// Rebuild from SQLite using batch operation
+		if len(vectors) > 0 {
+			hnswItems := make([]vectorindex.VectorItem, len(vectors))
+			for i, v := range vectors {
+				hnswItems[i] = vectorindex.VectorItem{
+					ID:     fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID),
+					Vector: v.Vector,
+				}
+			}
+			if err := s.hnsw.AddBatch(hnswItems); err != nil {
+				log.Printf("warning: failed to add vectors to HNSW: %v", err)
 			}
 		}
 
 		// Save rebuilt index
-		if s.hnsw.IsDirty() {
-			hnswPath := filepath.Join(s.config.BasePath, "hnsw.idx")
-			if err := s.hnsw.SaveToFile(hnswPath); err != nil {
-				log.Printf("warning: failed to save HNSW index: %v", err)
-			}
+		if err := s.saveHNSWIndex(); err != nil {
+			log.Printf("warning: failed to save HNSW index: %v", err)
 		}
 		s.mu.Unlock()
 
@@ -2923,7 +3118,9 @@ func (s *Store) Repair() error {
 	return nil
 }
 
-// embedDocumentUnlocked generates embeddings without acquiring locks (caller must hold lock)
+// embedDocumentUnlocked generates embeddings without acquiring locks (caller must hold lock).
+// NOTE: This function does NOT save the HNSW index - caller is responsible for calling
+// saveHNSWIndex() after batch operations complete.
 func (s *Store) embedDocumentUnlocked(doc *Document) error {
 	if s.embedder == nil {
 		return nil
@@ -2978,18 +3175,29 @@ func (s *Store) embedDocumentUnlocked(doc *Document) error {
 		return fmt.Errorf("save vectors: %w", err)
 	}
 
-	// Add to HNSW index
-	for _, v := range vectors {
-		id := fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID)
-		s.hnsw.Add(id, v.Vector)
+	// Add to HNSW index using batch operation
+	hnswItems := make([]vectorindex.VectorItem, len(vectors))
+	for i, v := range vectors {
+		hnswItems[i] = vectorindex.VectorItem{
+			ID:     fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID),
+			Vector: v.Vector,
+		}
+	}
+	if err := s.hnsw.AddBatch(hnswItems); err != nil {
+		return fmt.Errorf("add vectors to HNSW: %w", err)
 	}
 
-	// Persist HNSW index
-	hnswPath := filepath.Join(s.config.BasePath, "hnsw.idx")
-	if err := s.hnsw.SaveToFile(hnswPath); err != nil {
-		return fmt.Errorf("save HNSW index: %w", err)
-	}
+	return nil
+}
 
+// saveHNSWIndex saves the HNSW index to disk if there are pending changes
+func (s *Store) saveHNSWIndex() error {
+	if s.hnsw.IsDirty() {
+		hnswPath := filepath.Join(s.config.BasePath, "hnsw.idx")
+		if err := s.hnsw.SaveToFile(hnswPath); err != nil {
+			return fmt.Errorf("save HNSW index: %w", err)
+		}
+	}
 	return nil
 }
 

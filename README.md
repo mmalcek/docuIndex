@@ -526,6 +526,44 @@ if len(pending) > 0 {
 }
 ```
 
+### Background Embedding
+
+For non-blocking embedding that allows your application to remain responsive:
+
+```go
+// Start background embedding (returns immediately)
+err := store.EmbedPendingDocumentsAsync()
+if err != nil {
+    log.Fatal(err)
+}
+
+// Check progress periodically
+for store.IsBackgroundRunning() {
+    status := store.GetBackgroundStatus()
+    fmt.Printf("Progress: %.1f%% (%d/%d documents)\n",
+        status.Progress(),
+        status.DocumentsDone,
+        status.DocumentsTotal)
+    time.Sleep(time.Second)
+}
+
+// Or block until completion
+if err := store.WaitForBackground(); err != nil {
+    log.Printf("Background embedding failed: %v", err)
+}
+
+// Cancel if needed (e.g., on application shutdown)
+store.CancelBackground()
+```
+
+The `BackgroundEmbeddingStatus` provides detailed progress:
+- `Running` - whether embedding is in progress
+- `DocumentsTotal` / `DocumentsDone` - progress counters
+- `CurrentDocID` / `CurrentDocName` - currently processing document
+- `ElapsedTime` - time since start
+- `Error` - error if failed
+- `Progress()` - completion percentage (0-100)
+
 ### HNSW Tuning by Use Case
 
 | Use Case | EfConst | EfSearch | Notes |

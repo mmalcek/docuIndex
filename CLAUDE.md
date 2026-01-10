@@ -231,6 +231,7 @@ CREATE TABLE document_tags (
 | `AccessToken` | Azure access token with expiry time |
 | `HNSWConfig` | HNSW vector index configuration (M, EfConst, EfSearch) |
 | `StoreHealth` | Health check results (HNSWSynced, IncompleteEmbeddings, PendingEmbeddings, counts) |
+| `BackgroundEmbeddingStatus` | Status of background embedding (Running, DocumentsTotal, DocumentsDone, Progress()) |
 
 ## Public API
 
@@ -420,7 +421,7 @@ filter := docuindex.NewFilter().
 
 results, err := store.Search("query", docuindex.WithFilter(filter))
 
-// === Bulk Import & Deferred Embedding ===
+// === Bulk Import & Deferred Embedding (Optimized) ===
 
 // Batch index multiple custom data records (optimized for bulk imports)
 docs, err := store.IndexCustomDataBatch(allData,
@@ -430,11 +431,29 @@ docs, err := store.IndexCustomDataBatch(allData,
 // Get documents that need embeddings (for resumable maintenance tasks)
 pending, err := store.GetDocumentsWithoutEmbeddings()
 
-// Embed specific documents by ID
+// Embed specific documents by ID (HNSW saved once at end)
 err := store.EmbedDocuments(docID1, docID2, ...)
 
-// Embed ALL documents that don't have embeddings yet
+// Embed ALL documents that don't have embeddings yet (HNSW saved once at end)
 err := store.EmbedPendingDocuments()
+
+// === Background Embedding (Non-blocking) ===
+
+// Start embedding in background - returns immediately
+err := store.EmbedPendingDocumentsAsync()
+
+// Check if background embedding is running
+if store.IsBackgroundRunning() {
+    status := store.GetBackgroundStatus()
+    fmt.Printf("Progress: %.1f%% (%d/%d docs)\n",
+        status.Progress(), status.DocumentsDone, status.DocumentsTotal)
+}
+
+// Wait for background embedding to complete (blocking)
+err := store.WaitForBackground()
+
+// Cancel background embedding (stops after current document)
+store.CancelBackground()
 
 // === Recovery & Health Check APIs ===
 
@@ -703,6 +722,9 @@ go run main.go detect-intent "summarize this"  # Detect query intent type
 | Configure HNSW parameters | `options.go` WithHNSWConfig() |
 | Find unprocessed documents | `docuindex.go` GetDocumentsWithoutEmbeddings() |
 | Batch embed documents | `docuindex.go` EmbedPendingDocuments(), EmbedDocuments() |
+| Background embedding | `docuindex.go` EmbedPendingDocumentsAsync(), IsBackgroundRunning() |
+| Check background status | `docuindex.go` GetBackgroundStatus(), WaitForBackground() |
+| Cancel background work | `docuindex.go` CancelBackground() |
 | Check store health | `docuindex.go` CheckHealth() |
 | Repair store issues | `docuindex.go` Repair() |
 | Find incomplete embeddings | `docuindex.go` GetDocumentsWithIncompleteEmbeddings() |
