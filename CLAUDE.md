@@ -259,6 +259,11 @@ doc, err := store.IndexDocument("/path/to/file.pdf",
 // Index from io.Reader
 doc, err := store.IndexReader(reader, "filename.pdf")
 
+// Index document with deferred embedding (for bulk imports)
+doc, err := store.IndexDocument("/path/to/file.pdf",
+    docuindex.WithDeferEmbedding(true),  // Skip embedding, use EmbedPendingDocuments() later
+)
+
 // Index custom data (creates new document each time)
 doc, err := store.IndexCustomData(&docuindex.CustomData{
     Source:      "crm",
@@ -759,7 +764,7 @@ go run main.go detect-intent "summarize this"  # Detect query intent type
 | Modify stemming | `internal/nlp/stemmer.go` Stem() |
 | Get database info | `docuindex.go` DatabaseInfo() |
 | Bump library version | `version.go` Version constant |
-| Bulk import custom data | `docuindex.go` IndexCustomDataBatch() with WithDeferEmbedding |
+| Defer embedding during index | `options.go` WithDeferEmbedding() (works with all Index* functions) |
 | Configure HNSW parameters | `options.go` WithHNSWConfig() |
 | Find unprocessed documents | `docuindex.go` GetDocumentsWithoutEmbeddings() |
 | Batch embed documents | `docuindex.go` EmbedPendingDocuments(), EmbedDocuments() |

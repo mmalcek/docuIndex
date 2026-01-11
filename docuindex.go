@@ -271,8 +271,8 @@ func (s *Store) IndexDocument(path string, opts ...IndexOption) (*Document, erro
 		return nil, fmt.Errorf("index document: %w", err)
 	}
 
-	// Generate embeddings if provider configured
-	if s.embedder != nil {
+	// Generate embeddings if provider configured and not deferred
+	if !config.DeferEmbedding && s.embedder != nil {
 		if err := s.embedDocument(doc); err != nil {
 			// Log but don't fail - document is already saved
 			fmt.Printf("warning: embedding failed: %v\n", err)
@@ -764,8 +764,8 @@ func (s *Store) IndexCustomData(data *CustomData, opts ...IndexOption) (*Documen
 		return nil, fmt.Errorf("index document: %w", err)
 	}
 
-	// Generate embeddings if provider configured
-	if s.embedder != nil {
+	// Generate embeddings if provider configured and not deferred
+	if !config.DeferEmbedding && s.embedder != nil {
 		if err := s.embedDocument(doc); err != nil {
 			fmt.Printf("warning: embedding failed: %v\n", err)
 		}
@@ -1031,8 +1031,8 @@ func (s *Store) UpsertCustomData(data *CustomData, opts ...IndexOption) (*Docume
 		return nil, fmt.Errorf("index document: %w", err)
 	}
 
-	// Generate embeddings if provider configured
-	if s.embedder != nil {
+	// Generate embeddings if provider configured and not deferred
+	if !config.DeferEmbedding && s.embedder != nil {
 		if err := s.embedDocument(doc); err != nil {
 			fmt.Printf("warning: embedding failed: %v\n", err)
 		}
@@ -1092,8 +1092,8 @@ func (s *Store) IndexReader(r io.Reader, name string, opts ...IndexOption) (*Doc
 		return nil, fmt.Errorf("index document: %w", err)
 	}
 
-	// Generate embeddings if provider configured
-	if s.embedder != nil {
+	// Generate embeddings if provider configured and not deferred
+	if !config.DeferEmbedding && s.embedder != nil {
 		if err := s.embedDocument(doc); err != nil {
 			fmt.Printf("warning: embedding failed: %v\n", err)
 		}
@@ -1766,8 +1766,8 @@ func (s *Store) IndexDocumentWithProgress(path string, callback ProgressCallback
 		return nil, progress.Error
 	}
 
-	// Embedding phase
-	if s.embedder != nil {
+	// Embedding phase (unless deferred)
+	if !config.DeferEmbedding && s.embedder != nil {
 		progress.Status = "embedding"
 		progress.ElapsedTime = time.Since(startTime)
 		callback(progress)

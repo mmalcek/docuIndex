@@ -160,6 +160,11 @@ doc, err := store.IndexDocument("./document.pdf",
 // Now searchable with:
 // store.Search("query", docuindex.WithSources("knowledgebase"))
 // store.Search("query", docuindex.WithTags(map[string]string{"department": "engineering"}))
+
+// With deferred embedding (for bulk imports - embed later with EmbedPendingDocuments)
+doc, err := store.IndexDocument("./document.pdf",
+    docuindex.WithDeferEmbedding(true),
+)
 ```
 
 #### Index Custom Data
