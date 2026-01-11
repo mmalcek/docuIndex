@@ -197,6 +197,14 @@ func normalizeImageFormat(format string) string {
 	return format
 }
 
+// sourceOrDefault returns source if non-empty, otherwise returns defaultSource
+func sourceOrDefault(source, defaultSource string) string {
+	if source != "" {
+		return source
+	}
+	return defaultSource
+}
+
 // IndexDocument indexes a document from a file path
 func (s *Store) IndexDocument(path string, opts ...IndexOption) (*Document, error) {
 	s.mu.Lock()
@@ -231,6 +239,13 @@ func (s *Store) IndexDocument(path string, opts ...IndexOption) (*Document, erro
 	// Save to SQLite (document must exist before images due to FK constraint)
 	if err := s.db.SaveDocument(toSQLiteDocument(doc)); err != nil {
 		return nil, fmt.Errorf("save document: %w", err)
+	}
+
+	// Save tags if provided
+	if len(config.Tags) > 0 {
+		if err := s.db.SaveDocumentTags(doc.Info.ID, config.Tags); err != nil {
+			return nil, fmt.Errorf("save tags: %w", err)
+		}
 	}
 
 	// Now save images (after document exists in DB)
@@ -425,6 +440,7 @@ func (s *Store) indexPDF(path string, config *indexConfig) (*Document, []pending
 			SizeBytes:    fileInfo.Size(),
 			PageCount:    pageCount,
 			Format:       FormatPDF,
+			Source:       sourceOrDefault(config.Source, string(FormatPDF)),
 			Checksum:     checksum,
 			CreatedAt:    time.Now(),
 			UpdatedAt:    time.Now(),
@@ -517,6 +533,7 @@ func (s *Store) indexDOCX(path string, config *indexConfig) (*Document, []pendin
 			SizeBytes:    fileInfo.Size(),
 			PageCount:    pageCount,
 			Format:       FormatDOCX,
+			Source:       sourceOrDefault(config.Source, string(FormatDOCX)),
 			Checksum:     checksum,
 			CreatedAt:    time.Now(),
 			UpdatedAt:    time.Now(),
@@ -1062,6 +1079,13 @@ func (s *Store) IndexReader(r io.Reader, name string, opts ...IndexOption) (*Doc
 		return nil, fmt.Errorf("save document: %w", err)
 	}
 
+	// Save tags if provided
+	if len(config.Tags) > 0 {
+		if err := s.db.SaveDocumentTags(doc.Info.ID, config.Tags); err != nil {
+			return nil, fmt.Errorf("save tags: %w", err)
+		}
+	}
+
 	// Index for BM25 search
 	blocks := toSQLiteBlocks(doc)
 	if err := s.db.IndexDocument(doc.Info.ID, blocks); err != nil {
@@ -1108,6 +1132,7 @@ func (s *Store) indexPDFFromBytes(data []byte, name string, config *indexConfig)
 			SizeBytes: int64(len(data)),
 			PageCount: pageCount,
 			Format:    FormatPDF,
+			Source:    sourceOrDefault(config.Source, string(FormatPDF)),
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
 		},
@@ -1151,6 +1176,7 @@ func (s *Store) indexDOCXFromBytes(data []byte, name string, config *indexConfig
 			SizeBytes: int64(len(data)),
 			PageCount: pageCount,
 			Format:    FormatDOCX,
+			Source:    sourceOrDefault(config.Source, string(FormatDOCX)),
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
 		},

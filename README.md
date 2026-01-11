@@ -148,6 +148,18 @@ doc, err := store.IndexReader(file, "document.docx")
 doc, err := store.IndexDocument("./document.pdf",
     docuindex.WithName("My Custom Name"),
 )
+
+// With custom source and tags for filtering
+doc, err := store.IndexDocument("./document.pdf",
+    docuindex.WithIndexSource("knowledgebase"),
+    docuindex.WithIndexTags(map[string]string{
+        "department": "engineering",
+        "project":    "alpha",
+    }),
+)
+// Now searchable with:
+// store.Search("query", docuindex.WithSources("knowledgebase"))
+// store.Search("query", docuindex.WithTags(map[string]string{"department": "engineering"}))
 ```
 
 #### Index Custom Data

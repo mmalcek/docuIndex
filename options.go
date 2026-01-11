@@ -238,11 +238,13 @@ func WithImages(include bool) SearchOption {
 type IndexOption func(*indexConfig)
 
 type indexConfig struct {
-	ForceReindex     bool             // Re-index even if document exists
-	SourcePath       string           // Original file path for metadata
-	Name             string           // Override document name
-	ProgressCallback ProgressCallback // Callback for progress updates
-	DeferEmbedding   bool             // Skip embedding during indexing (use EmbedPendingDocuments later)
+	ForceReindex     bool              // Re-index even if document exists
+	SourcePath       string            // Original file path for metadata
+	Name             string            // Override document name
+	ProgressCallback ProgressCallback  // Callback for progress updates
+	DeferEmbedding   bool              // Skip embedding during indexing (use EmbedPendingDocuments later)
+	Source           string            // Override document source (default: format like "pdf" or "docx")
+	Tags             map[string]string // Document tags for filtering
 }
 
 func defaultIndexConfig() *indexConfig {
@@ -286,6 +288,23 @@ func WithProgressCallback(fn ProgressCallback) IndexOption {
 func WithDeferEmbedding(defer_ bool) IndexOption {
 	return func(c *indexConfig) {
 		c.DeferEmbedding = defer_
+	}
+}
+
+// WithIndexSource sets a custom source identifier for the document.
+// This overrides the default format-based source ("pdf" or "docx").
+// Use this for logical categorization like "knowledgebase", "manual", etc.
+func WithIndexSource(source string) IndexOption {
+	return func(c *indexConfig) {
+		c.Source = source
+	}
+}
+
+// WithIndexTags sets metadata tags for the document.
+// Tags enable filtering in search queries via WithTags() search option.
+func WithIndexTags(tags map[string]string) IndexOption {
+	return func(c *indexConfig) {
+		c.Tags = tags
 	}
 }
 

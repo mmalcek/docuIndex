@@ -250,6 +250,12 @@ store, err := docuindex.NewStore("/path/to/data")
 doc, err := store.IndexDocument("/path/to/file.pdf")
 doc, err := store.IndexDocument("/path/to/file.docx")
 
+// Index a document with custom source and tags for filtering
+doc, err := store.IndexDocument("/path/to/file.pdf",
+    docuindex.WithIndexSource("knowledgebase"),
+    docuindex.WithIndexTags(map[string]string{"department": "engineering", "project": "alpha"}),
+)
+
 // Index from io.Reader
 doc, err := store.IndexReader(reader, "filename.pdf")
 
@@ -547,8 +553,11 @@ docuindex.WithEfSearch(int)            // Override HNSW efSearch (0=default, 50=
 
 ### Index Options
 ```go
-docuindex.WithProgressCallback(fn)     // Receive indexing progress updates
-docuindex.WithDeferEmbedding(bool)     // Skip embedding during indexing (use EmbedPendingDocuments later)
+docuindex.WithName(string)                 // Override document name
+docuindex.WithIndexSource(string)          // Override source (default: format like "pdf" or "docx")
+docuindex.WithIndexTags(map[string]string) // Set document tags for filtering
+docuindex.WithProgressCallback(fn)         // Receive indexing progress updates
+docuindex.WithDeferEmbedding(bool)         // Skip embedding during indexing (use EmbedPendingDocuments later)
 ```
 
 ### Embedding Providers
