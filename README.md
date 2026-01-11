@@ -313,6 +313,143 @@ results, err := store.Search("neural networks",
 )
 ```
 
+#### Search Options Reference
+
+##### Core Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `WithMaxResults(n)` | int | 100 | Maximum number of results to return |
+| `WithMinScore(score)` | float64 | 0.0 | Filter out results below this relevance threshold |
+| `WithContextWindow(blocks)` | int | 2 | Number of surrounding blocks to include for RAG context |
+| `WithHighlight(pre, post)` | string, string | "**", "**" | Markers to wrap matched terms in snippets |
+| `WithPageRange(start, end)` | int, int | - | Limit search to specific page range |
+| `WithDocuments(...ids)` | []string | - | Search only within specified document IDs |
+| `WithSections(...names)` | []string | - | Limit search to specific section names |
+| `WithImages(bool)` | bool | false | Include image paths in search results |
+
+##### Search Mode Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `WithSearchMode(mode)` | SearchMode | Hybrid | Search strategy: `SearchModeKeyword`, `SearchModeSemantic`, or `SearchModeHybrid` |
+| `WithVectorWeight(weight)` | float64 | 0.5 | Weight for semantic/vector search results (0.0-1.0) |
+| `WithKeywordWeight(weight)` | float64 | 0.5 | Weight for BM25 keyword search results (0.0-1.0) |
+| `WithEfSearch(ef)` | int | 50 | HNSW search thoroughness (50=fast, 100=balanced, 200+=high recall) |
+
+##### Filtering Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `WithSources(...sources)` | []string | - | Filter by source or format (e.g., "pdf", "crm", "docx") |
+| `WithTags(tags)` | map[string]string | - | Filter by tags with AND logic; use "!" prefix for negation |
+| `WithMetadata(bool)` | bool | false | Include tags, source, external_id in results |
+| `WithFilter(filter)` | *Filter | - | Advanced Filter DSL for complex queries |
+
+##### AI/Agent Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `WithAgentOutput(bool)` | bool | false | Return structured `AgentSearchResponse` format |
+| `WithEstimateTokens(bool)` | bool | false | Include token count estimates in results |
+| `WithCitations(bool)` | bool | false | Add citation references [1], [2], etc. |
+| `WithChunking(opts)` | ChunkOptions | - | Configure result chunking for LLM context windows |
+
+#### Understanding Vector and Keyword Weights
+
+The `WithVectorWeight` and `WithKeywordWeight` options control how hybrid search combines semantic (vector) and keyword (BM25) results using Reciprocal Rank Fusion (RRF).
+
+**How weights work:**
+- Both values should be between 0.0 and 1.0
+- They control the relative importance of each search signal
+- The weights don't need to sum to 1.0, but typically do for clarity
+
+**Practical examples:**
+
+```go
+// Balanced hybrid search (default behavior)
+results, err := store.Search("machine learning concepts",
+    docuindex.WithVectorWeight(0.5),
+    docuindex.WithKeywordWeight(0.5),
+)
+
+// Emphasize semantic understanding - good for conceptual queries
+// "How does photosynthesis work?" benefits from semantic search
+results, err := store.Search("how does photosynthesis work",
+    docuindex.WithVectorWeight(0.7),
+    docuindex.WithKeywordWeight(0.3),
+)
+
+// Emphasize keyword matching - good for specific terms/names
+// Searching for "RFC 7231" or "John Smith" benefits from keyword search
+results, err := store.Search("RFC 7231",
+    docuindex.WithVectorWeight(0.3),
+    docuindex.WithKeywordWeight(0.7),
+)
+
+// Pure semantic search (equivalent to SearchModeSemantic)
+results, err := store.Search("explain the concept",
+    docuindex.WithVectorWeight(1.0),
+    docuindex.WithKeywordWeight(0.0),
+)
+
+// Pure keyword search (equivalent to SearchModeKeyword)
+results, err := store.Search("exact phrase",
+    docuindex.WithVectorWeight(0.0),
+    docuindex.WithKeywordWeight(1.0),
+)
+```
+
+**When to adjust weights:**
+
+| Query Type | Recommended Weights | Reason |
+|------------|---------------------|--------|
+| Conceptual questions | Vector: 0.7, Keyword: 0.3 | Semantic search understands meaning |
+| Specific terms/IDs | Vector: 0.3, Keyword: 0.7 | Keywords need exact matching |
+| Technical documentation | Vector: 0.5, Keyword: 0.5 | Balance both signals |
+| Natural language | Vector: 0.6, Keyword: 0.4 | Slight semantic preference |
+| Code/API references | Vector: 0.2, Keyword: 0.8 | Exact symbol matching important |
+
+#### HNSW Search Tuning with EfSearch
+
+The `WithEfSearch` option controls how thoroughly the HNSW vector index is searched. Higher values improve recall (finding more relevant results) at the cost of latency.
+
+```go
+// Fast search - good for real-time applications
+results, err := store.Search("query",
+    docuindex.WithEfSearch(50),
+)
+
+// Balanced - good for most use cases
+results, err := store.Search("query",
+    docuindex.WithEfSearch(100),
+)
+
+// High recall - good for batch processing or critical queries
+results, err := store.Search("important query",
+    docuindex.WithEfSearch(200),
+)
+```
+
+**EfSearch guidelines by dataset size:**
+
+| Block Count | Recommended EfSearch | Notes |
+|-------------|---------------------|-------|
+| < 10,000 | 50 (default) | Fast, high recall naturally |
+| 10,000 - 50,000 | 100 | Good balance |
+| 50,000 - 100,000 | 100-150 | May need tuning |
+| > 100,000 | 200+ | Higher values for critical searches |
+
+**Note:** `WithEfSearch` only affects the current query. To set a default for all searches, use `WithHNSWConfig` when creating the store:
+
+```go
+store, _ := docuindex.NewStore("./data",
+    docuindex.WithHNSWConfig(docuindex.HNSWConfig{
+        EfSearch: 100,  // Default for all queries
+    }),
+)
+```
+
 #### Boolean and Phrase Queries
 
 ```go
