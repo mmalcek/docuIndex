@@ -212,7 +212,8 @@ CREATE TABLE document_tags (
 | `DocumentInfo` | Metadata (ID, Name, Size, PageCount, Format, Source, Description, ImportedAt, ExternalID, Timestamps) |
 | `Store` | Document storage and search interface |
 | `SearchResult` | Search hit with score, snippet, context, images, and optional metadata (Tags, Source, ExternalID via WithMetadata) |
-| `SearchResults` | Query results with timing and total hits |
+| `SearchResults` | Query results with timing, total hits, and optional diagnostics |
+| `SearchDiagnostics` | Detailed search execution info (timing, counts, filtering stats) |
 | `BoundingBox` | Position information with `RelativePosition()` method |
 | `SemanticInfo` | AI-friendly metadata (headings, sections, keywords) |
 | `FontInfo` | Font name, size, bold, italic flags |
@@ -554,6 +555,8 @@ docuindex.WithEstimateTokens(bool)     // Include token estimates in results
 docuindex.WithCitations(bool)          // Add citation references [1], [2], etc.
 docuindex.WithChunking(ChunkOptions)   // Configure result chunking
 docuindex.WithEfSearch(int)            // Override HNSW efSearch (0=default, 50=fast, 200+=high recall)
+docuindex.WithDiversify(int)           // Max results per document (0 = unlimited)
+docuindex.WithDiagnostics(bool)        // Include search diagnostics in results
 ```
 
 ### Index Options
@@ -780,6 +783,8 @@ go run main.go detect-intent "summarize this"  # Detect query intent type
 | Tune vector search recall/speed | `options.go` WithEfSearch() per-query, WithHNSWConfig() store-wide |
 | Include metadata in search results | `options.go` WithMetadata(), `docuindex.go` Search() |
 | Filter by negated tag values | `sqlite/tags.go` GetDocumentIDsByTags() with `!` prefix |
+| Diversify search results | `options.go` WithDiversify() |
+| Enable search diagnostics | `options.go` WithDiagnostics() |
 
 ## Dependencies
 

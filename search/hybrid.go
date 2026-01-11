@@ -59,15 +59,16 @@ func DefaultHybridSearchOptions() *HybridSearchOptions {
 
 // HybridSearchResults contains results with metadata
 type HybridSearchResults struct {
-	Query          string
-	Mode           SearchMode
-	TotalHits      int
-	Results        []FusedResult
-	SearchTime     time.Duration
-	KeywordTime    time.Duration
-	VectorTime     time.Duration
-	KeywordResults int
-	VectorResults  int
+	Query           string
+	Mode            SearchMode
+	TotalHits       int
+	Results         []FusedResult
+	SearchTime      time.Duration
+	KeywordTime     time.Duration
+	VectorTime      time.Duration
+	KeywordResults  int
+	VectorResults   int
+	FilteredByScore int
 }
 
 // Search performs hybrid search
@@ -120,7 +121,9 @@ func (h *HybridSearcher) keywordOnlySearch(ctx context.Context, query string, op
 	}
 
 	if opts.MinScore > 0 {
+		beforeFilter := len(fused)
 		fused = FilterByFusedScore(fused, opts.MinScore)
+		results.FilteredByScore = beforeFilter - len(fused)
 	}
 
 	results.Results = fused
@@ -166,7 +169,9 @@ func (h *HybridSearcher) vectorOnlySearch(ctx context.Context, query string, opt
 	}
 
 	if opts.MinScore > 0 {
+		beforeFilter := len(fused)
 		fused = FilterByFusedScore(fused, opts.MinScore)
+		results.FilteredByScore = beforeFilter - len(fused)
 	}
 
 	results.Results = fused
@@ -256,9 +261,14 @@ func (h *HybridSearcher) hybridSearch(ctx context.Context, query string, opts *H
 	// Fuse results
 	fused := RRFFusion(keywordFused, vectorFused, fusionConfig)
 
-	// Apply filters
+	// Normalize scores to 0-1 range for intuitive MinScore filtering
+	NormalizeFusedScores(fused)
+
+	// Apply filters (now works with normalized 0-1 scores)
 	if opts.MinScore > 0 {
+		beforeFilter := len(fused)
 		fused = FilterByFusedScore(fused, opts.MinScore)
+		results.FilteredByScore = beforeFilter - len(fused)
 	}
 
 	// Limit results

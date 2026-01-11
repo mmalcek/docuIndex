@@ -304,10 +304,23 @@ type SearchResult struct {
 
 // SearchResults contains search results with metadata
 type SearchResults struct {
-	Query      string         `json:"query"`
-	TotalHits  int            `json:"total_hits"`
-	Results    []SearchResult `json:"results"`
-	SearchTime time.Duration  `json:"search_time"`
+	Query       string             `json:"query"`
+	TotalHits   int                `json:"total_hits"`
+	Results     []SearchResult     `json:"results"`
+	SearchTime  time.Duration      `json:"search_time"`
+	Diagnostics *SearchDiagnostics `json:"diagnostics,omitempty"`
+}
+
+// SearchDiagnostics provides detailed information about how search was executed.
+// Useful for debugging and optimizing search performance.
+type SearchDiagnostics struct {
+	KeywordResults  int           `json:"keyword_results"`  // Results from BM25 keyword search
+	VectorResults   int           `json:"vector_results"`   // Results from vector/semantic search
+	KeywordTime     time.Duration `json:"keyword_time"`     // Time spent on keyword search
+	VectorTime      time.Duration `json:"vector_time"`      // Time spent on vector search
+	FusionTime      time.Duration `json:"fusion_time"`      // Time spent fusing results
+	FilteredByScore int           `json:"filtered_by_score"` // Results filtered by MinScore
+	DiversifiedFrom int           `json:"diversified_from"`  // Results before diversification (0 if not applied)
 }
 
 // ContextResult contains content blocks around a specific block

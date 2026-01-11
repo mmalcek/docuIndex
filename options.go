@@ -157,6 +157,12 @@ type searchConfig struct {
 
 	// HNSW tuning
 	EfSearch int // Override efSearch for this query (0 = use default)
+
+	// Result diversification
+	MaxPerDocument int // Max results per document (0 = unlimited)
+
+	// Diagnostics
+	IncludeDiagnostics bool // Include search diagnostics in results
 }
 
 func defaultSearchConfig() *searchConfig {
@@ -409,5 +415,23 @@ func WithEfSearch(ef int) SearchOption {
 func WithMetadata(include bool) SearchOption {
 	return func(c *searchConfig) {
 		c.IncludeMetadata = include
+	}
+}
+
+// WithDiversify limits the number of results per document to improve variety.
+// This is useful when multiple blocks from the same document match the query.
+// Set maxPerDoc to 0 (default) for unlimited results per document.
+func WithDiversify(maxPerDoc int) SearchOption {
+	return func(c *searchConfig) {
+		c.MaxPerDocument = maxPerDoc
+	}
+}
+
+// WithDiagnostics enables detailed search diagnostics in the results.
+// Diagnostics include timing breakdowns, result counts per search type, and filtering stats.
+// Useful for debugging and optimizing search performance.
+func WithDiagnostics(enabled bool) SearchOption {
+	return func(c *searchConfig) {
+		c.IncludeDiagnostics = enabled
 	}
 }

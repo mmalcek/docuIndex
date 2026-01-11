@@ -355,6 +355,13 @@ results, err := store.Search("neural networks",
 | `WithCitations(bool)` | bool | false | Add citation references [1], [2], etc. |
 | `WithChunking(opts)` | ChunkOptions | - | Configure result chunking for LLM context windows |
 
+##### Advanced Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `WithDiversify(maxPerDoc)` | int | 0 | Limit results per document for variety (0 = unlimited) |
+| `WithDiagnostics(bool)` | bool | false | Include detailed search diagnostics in results |
+
 #### Understanding Vector and Keyword Weights
 
 The `WithVectorWeight` and `WithKeywordWeight` options control how hybrid search combines semantic (vector) and keyword (BM25) results using Reciprocal Rank Fusion (RRF).
@@ -515,6 +522,38 @@ results, err := store.Search("bugs",
 ```
 
 Note: `WithMetadata` is disabled by default for performance. Enable it when you need to access tags, source, or external ID from search results.
+
+#### Search with Diversification
+
+When a single document contains many matching blocks, diversification limits results per document to improve variety:
+
+```go
+// Limit to max 3 results per document
+results, err := store.Search("machine learning",
+    docuindex.WithDiversify(3),
+)
+```
+
+#### Search Diagnostics
+
+Enable diagnostics to understand search performance and behavior:
+
+```go
+results, err := store.Search("query",
+    docuindex.WithDiagnostics(true),
+)
+
+if results.Diagnostics != nil {
+    fmt.Printf("Keyword results: %d\n", results.Diagnostics.KeywordResults)
+    fmt.Printf("Vector results: %d\n", results.Diagnostics.VectorResults)
+    fmt.Printf("Filtered by MinScore: %d\n", results.Diagnostics.FilteredByScore)
+    fmt.Printf("Diversified from: %d results\n", results.Diagnostics.DiversifiedFrom)
+    fmt.Printf("Timing - Keyword: %v, Vector: %v, Fusion: %v\n",
+        results.Diagnostics.KeywordTime,
+        results.Diagnostics.VectorTime,
+        results.Diagnostics.FusionTime)
+}
+```
 
 #### Get Context for RAG
 

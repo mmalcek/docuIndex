@@ -1381,12 +1381,54 @@ func (s *Store) Search(query string, opts ...SearchOption) (*SearchResults, erro
 		}
 	}
 
-	return &SearchResults{
+	// Apply diversification if requested
+	diversifiedFrom := 0
+	if config.MaxPerDocument > 0 {
+		diversifiedFrom = len(results)
+		results = diversifyResults(results, config.MaxPerDocument)
+	}
+
+	searchResults := &SearchResults{
 		Query:      query,
 		TotalHits:  len(results),
 		Results:    results,
 		SearchTime: time.Since(startTime),
-	}, nil
+	}
+
+	// Add diagnostics if requested
+	if config.IncludeDiagnostics {
+		searchResults.Diagnostics = &SearchDiagnostics{
+			KeywordResults:  hybridResults.KeywordResults,
+			VectorResults:   hybridResults.VectorResults,
+			KeywordTime:     hybridResults.KeywordTime,
+			VectorTime:      hybridResults.VectorTime,
+			FusionTime:      hybridResults.SearchTime - hybridResults.KeywordTime - hybridResults.VectorTime,
+			FilteredByScore: hybridResults.FilteredByScore,
+			DiversifiedFrom: diversifiedFrom,
+		}
+	}
+
+	return searchResults, nil
+}
+
+// diversifyResults limits results per document to improve variety
+func diversifyResults(results []SearchResult, maxPerDoc int) []SearchResult {
+	if maxPerDoc <= 0 {
+		return results
+	}
+
+	docCounts := make(map[string]int)
+	var diversified []SearchResult
+
+	for _, result := range results {
+		count := docCounts[result.DocumentID]
+		if count < maxPerDoc {
+			diversified = append(diversified, result)
+			docCounts[result.DocumentID]++
+		}
+	}
+
+	return diversified
 }
 
 // keywordSearch performs BM25 search (used by hybrid searcher)
