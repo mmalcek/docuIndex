@@ -120,15 +120,13 @@ func (s *Store) GetDocument(id string) (*Document, error) {
 		return nil, fmt.Errorf("query document: %w", err)
 	}
 
-	// Parse timestamps
-	doc.Info.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-	doc.Info.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+	// Parse timestamps (using helper for consistency)
+	doc.Info.CreatedAt = parseTimestampOrZero(createdAt)
+	doc.Info.UpdatedAt = parseTimestampOrZero(updatedAt)
 	doc.Info.Source = source.String
 	doc.Info.Description = description.String
 	doc.Info.ExternalID = externalID.String
-	if importedAt.String != "" {
-		doc.Info.ImportedAt, _ = time.Parse(time.RFC3339, importedAt.String)
-	}
+	doc.Info.ImportedAt = parseTimestampOrZero(importedAt.String)
 
 	// Get blocks
 	blocks, err := s.GetBlocksByDocument(id)
@@ -180,14 +178,12 @@ func (s *Store) ListDocuments() ([]DocumentInfo, error) {
 			return nil, fmt.Errorf("scan document: %w", err)
 		}
 
-		doc.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-		doc.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+		doc.CreatedAt = parseTimestampOrZero(createdAt)
+		doc.UpdatedAt = parseTimestampOrZero(updatedAt)
 		doc.Source = source.String
 		doc.Description = description.String
 		doc.ExternalID = externalID.String
-		if importedAt.String != "" {
-			doc.ImportedAt, _ = time.Parse(time.RFC3339, importedAt.String)
-		}
+		doc.ImportedAt = parseTimestampOrZero(importedAt.String)
 
 		docs = append(docs, doc)
 	}
@@ -260,14 +256,12 @@ func (s *Store) FindBySourceAndExternalID(source, externalID string) (*DocumentI
 		return nil, fmt.Errorf("query document by source/external_id: %w", err)
 	}
 
-	doc.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-	doc.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+	doc.CreatedAt = parseTimestampOrZero(createdAt)
+	doc.UpdatedAt = parseTimestampOrZero(updatedAt)
 	doc.Source = srcNull.String
 	doc.Description = description.String
 	doc.ExternalID = extID.String
-	if importedAt.String != "" {
-		doc.ImportedAt, _ = time.Parse(time.RFC3339, importedAt.String)
-	}
+	doc.ImportedAt = parseTimestampOrZero(importedAt.String)
 
 	return &doc, nil
 }
@@ -313,14 +307,39 @@ func (s *Store) UpdateDocumentTimestamp(id string) error {
 	return nil
 }
 
-// jsonMarshal is a helper to marshal JSON with null handling
+// parseTimestamp parses an RFC3339 timestamp string.
+// Empty strings return zero time (no error).
+// Non-empty malformed strings return an error.
+func parseTimestamp(value string) (time.Time, error) {
+	if value == "" {
+		return time.Time{}, nil
+	}
+	t, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid timestamp %q: %w", value, err)
+	}
+	return t, nil
+}
+
+// parseTimestampOrZero parses timestamp, returning zero time on any error.
+// This is used for backwards compatibility where we prefer zero time over errors.
+func parseTimestampOrZero(value string) time.Time {
+	t, _ := parseTimestamp(value)
+	return t
+}
+
+// jsonMarshal is a helper to marshal JSON with null handling.
+// Returns empty string on nil input.
+// Panics on marshal error (should never happen with simple types).
 func jsonMarshal(v interface{}) string {
 	if v == nil {
 		return ""
 	}
 	data, err := json.Marshal(v)
 	if err != nil {
-		return ""
+		// This should never happen for []string or map[string]string
+		// If it does, it's a programming error worth panicking over
+		panic(fmt.Sprintf("jsonMarshal: unexpected error marshaling %T: %v", v, err))
 	}
 	return string(data)
 }
@@ -385,14 +404,12 @@ func (s *Store) GetDocumentsWithoutEmbeddings() ([]DocumentInfo, error) {
 			return nil, fmt.Errorf("scan document: %w", err)
 		}
 
-		doc.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-		doc.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+		doc.CreatedAt = parseTimestampOrZero(createdAt)
+		doc.UpdatedAt = parseTimestampOrZero(updatedAt)
 		doc.Source = source.String
 		doc.Description = description.String
 		doc.ExternalID = externalID.String
-		if importedAt.String != "" {
-			doc.ImportedAt, _ = time.Parse(time.RFC3339, importedAt.String)
-		}
+		doc.ImportedAt = parseTimestampOrZero(importedAt.String)
 
 		docs = append(docs, doc)
 	}
@@ -463,14 +480,12 @@ func (s *Store) GetDocumentsWithIncompleteEmbeddings() ([]DocumentInfo, error) {
 
 		doc.OriginalPath = originalPath.String
 		doc.Checksum = checksum.String
-		doc.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-		doc.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+		doc.CreatedAt = parseTimestampOrZero(createdAt)
+		doc.UpdatedAt = parseTimestampOrZero(updatedAt)
 		doc.Source = source.String
 		doc.Description = description.String
 		doc.ExternalID = externalID.String
-		if importedAt.String != "" {
-			doc.ImportedAt, _ = time.Parse(time.RFC3339, importedAt.String)
-		}
+		doc.ImportedAt = parseTimestampOrZero(importedAt.String)
 
 		docs = append(docs, doc)
 	}

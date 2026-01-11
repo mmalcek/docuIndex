@@ -122,6 +122,9 @@ const MaxGraphicsStateDepth = 1000
 // MaxFormXObjectDepth limits nested form XObject recursion
 const MaxFormXObjectDepth = 50
 
+// MaxOperandStackSize limits operand stack to prevent memory exhaustion from malformed PDFs
+const MaxOperandStackSize = 10000
+
 // ContentInterpreter interprets PDF content streams
 type ContentInterpreter struct {
 	page             *Page
@@ -183,22 +186,22 @@ func (ci *ContentInterpreter) Execute() error {
 			}
 			ci.operands = ci.operands[:0] // Clear operands after operator
 		case TokenInteger:
-			ci.operands = append(ci.operands, Integer(tok.IntValue()))
+			ci.pushOperand(Integer(tok.IntValue()))
 		case TokenReal:
-			ci.operands = append(ci.operands, Real(tok.FloatValue()))
+			ci.pushOperand(Real(tok.FloatValue()))
 		case TokenString:
-			ci.operands = append(ci.operands, String(tok.StringValue()))
+			ci.pushOperand(String(tok.StringValue()))
 		case TokenName:
-			ci.operands = append(ci.operands, Name(tok.StringValue()))
+			ci.pushOperand(Name(tok.StringValue()))
 		case TokenArrayStart:
 			// Parse inline array
 			arr, err := ci.parseInlineArray(lexer)
 			if err != nil {
 				return err
 			}
-			ci.operands = append(ci.operands, arr)
+			ci.pushOperand(arr)
 		case TokenBool:
-			ci.operands = append(ci.operands, Boolean(tok.BoolValue()))
+			ci.pushOperand(Boolean(tok.BoolValue()))
 		}
 	}
 
@@ -761,22 +764,32 @@ func (ci *ContentInterpreter) processFormXObject(stream *Stream) {
 			ci.executeOperator(tok.StringValue())
 			ci.operands = ci.operands[:0]
 		case TokenInteger:
-			ci.operands = append(ci.operands, Integer(tok.IntValue()))
+			ci.pushOperand(Integer(tok.IntValue()))
 		case TokenReal:
-			ci.operands = append(ci.operands, Real(tok.FloatValue()))
+			ci.pushOperand(Real(tok.FloatValue()))
 		case TokenString:
-			ci.operands = append(ci.operands, String(tok.StringValue()))
+			ci.pushOperand(String(tok.StringValue()))
 		case TokenName:
-			ci.operands = append(ci.operands, Name(tok.StringValue()))
+			ci.pushOperand(Name(tok.StringValue()))
 		case TokenArrayStart:
 			arr, err := ci.parseInlineArray(lexer)
 			if err == nil {
-				ci.operands = append(ci.operands, arr)
+				ci.pushOperand(arr)
 			}
 		case TokenBool:
-			ci.operands = append(ci.operands, Boolean(tok.BoolValue()))
+			ci.pushOperand(Boolean(tok.BoolValue()))
 		}
 	}
+}
+
+// pushOperand adds an operand to the stack if within size limits
+// Returns true if added, false if stack is full (prevents memory exhaustion)
+func (ci *ContentInterpreter) pushOperand(obj Object) bool {
+	if len(ci.operands) >= MaxOperandStackSize {
+		return false // Stack full, ignore to prevent memory exhaustion
+	}
+	ci.operands = append(ci.operands, obj)
+	return true
 }
 
 // Helper methods to get operands

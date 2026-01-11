@@ -537,15 +537,60 @@ func generateSnippet(content string, terms []string, highlightPre, highlightPost
 		snippet = snippet[:200] + "..."
 	}
 
-	if highlightPre != "" && highlightPost != "" {
-		lower := strings.ToLower(snippet)
-		for _, term := range terms {
-			idx := strings.Index(lower, term)
-			if idx >= 0 {
-				// Simple highlight - could be improved
-				snippet = snippet[:idx] + highlightPre + snippet[idx:idx+len(term)] + highlightPost + snippet[idx+len(term):]
-				lower = strings.ToLower(snippet)
+	if highlightPre == "" || highlightPost == "" || len(terms) == 0 {
+		return snippet
+	}
+
+	// Find all match positions first to avoid index shifting issues
+	type match struct {
+		start, end int
+	}
+	var matches []match
+	lower := strings.ToLower(snippet)
+
+	for _, term := range terms {
+		termLower := strings.ToLower(term)
+		idx := 0
+		for {
+			pos := strings.Index(lower[idx:], termLower)
+			if pos == -1 {
+				break
 			}
+			absPos := idx + pos
+			matches = append(matches, match{absPos, absPos + len(term)})
+			idx = absPos + len(term)
+		}
+	}
+
+	if len(matches) == 0 {
+		return snippet
+	}
+
+	// Sort by position descending (process from end to avoid shift issues)
+	sort.Slice(matches, func(i, j int) bool {
+		return matches[i].start > matches[j].start
+	})
+
+	// Remove overlapping matches (keep the earlier one in original order)
+	var filtered []match
+	for _, m := range matches {
+		overlaps := false
+		for _, f := range filtered {
+			// Check if m overlaps with any already filtered match
+			if m.start < f.end && m.end > f.start {
+				overlaps = true
+				break
+			}
+		}
+		if !overlaps {
+			filtered = append(filtered, m)
+		}
+	}
+
+	// Apply highlights from end to start (positions stay valid)
+	for _, m := range filtered {
+		if m.start >= 0 && m.end <= len(snippet) {
+			snippet = snippet[:m.start] + highlightPre + snippet[m.start:m.end] + highlightPost + snippet[m.end:]
 		}
 	}
 

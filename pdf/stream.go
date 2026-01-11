@@ -96,9 +96,14 @@ func decodeFlateDecode(data []byte, params Dict) ([]byte, error) {
 	}
 	defer r.Close()
 
-	decoded, err := io.ReadAll(r)
+	// Limit decompression size to prevent memory exhaustion attacks
+	limitedReader := io.LimitReader(r, MaxDecompressedSize+1)
+	decoded, err := io.ReadAll(limitedReader)
 	if err != nil {
 		return nil, fmt.Errorf("zlib decompress: %w", err)
+	}
+	if len(decoded) > MaxDecompressedSize {
+		return nil, fmt.Errorf("decompressed size exceeds maximum limit of %d bytes", MaxDecompressedSize)
 	}
 
 	// Apply predictor if specified
@@ -340,7 +345,16 @@ func decodeASCII85(data []byte) ([]byte, error) {
 	}
 
 	decoder := ascii85.NewDecoder(bytes.NewReader(clean.Bytes()))
-	return io.ReadAll(decoder)
+	// Limit decoded size to prevent memory exhaustion attacks
+	limitedReader := io.LimitReader(decoder, MaxDecompressedSize+1)
+	decoded, err := io.ReadAll(limitedReader)
+	if err != nil {
+		return nil, fmt.Errorf("ascii85 decode: %w", err)
+	}
+	if len(decoded) > MaxDecompressedSize {
+		return nil, fmt.Errorf("decoded size exceeds maximum limit of %d bytes", MaxDecompressedSize)
+	}
+	return decoded, nil
 }
 
 // decodeLZW decodes LZW compressed data
@@ -364,9 +378,14 @@ func decodeLZW(data []byte, params Dict) ([]byte, error) {
 	r := lzw.NewReader(bytes.NewReader(data), order, litWidth)
 	defer r.Close()
 
-	decoded, err := io.ReadAll(r)
+	// Limit decompression size to prevent memory exhaustion attacks
+	limitedReader := io.LimitReader(r, MaxDecompressedSize+1)
+	decoded, err := io.ReadAll(limitedReader)
 	if err != nil {
 		return nil, fmt.Errorf("lzw decompress: %w", err)
+	}
+	if len(decoded) > MaxDecompressedSize {
+		return nil, fmt.Errorf("decompressed size exceeds maximum limit of %d bytes", MaxDecompressedSize)
 	}
 
 	// Apply predictor if specified

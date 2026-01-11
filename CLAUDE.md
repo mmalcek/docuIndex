@@ -25,6 +25,7 @@ docuindex/
 │   ├── xref.go        # Cross-reference table
 │   ├── document.go    # PDF document structure
 │   ├── stream.go      # Stream decompression
+│   ├── stream_test.go # Stream filter tests
 │   ├── page.go        # Page tree navigation
 │   ├── content.go     # Content stream interpreter
 │   ├── text.go        # Text extraction
@@ -53,8 +54,10 @@ docuindex/
 │   ├── store.go       # SQLiteStore implementation
 │   ├── schema.go      # Database schema and migrations
 │   ├── documents.go   # Document CRUD operations
+│   ├── documents_test.go # Document CRUD tests
 │   ├── blocks.go      # Content block operations
 │   ├── search.go      # BM25 search on SQLite
+│   ├── search_test.go # Search and tokenization tests
 │   ├── vectors.go     # Vector storage as BLOBs
 │   ├── images.go      # Image metadata + file management
 │   ├── tags.go        # Document tag operations
@@ -62,23 +65,27 @@ docuindex/
 │
 ├── embedding/          # Embedding providers
 │   ├── provider.go    # Provider interface + factory
+│   ├── provider_test.go # Provider tests (config, batching, retry)
 │   ├── azure.go       # Azure OpenAI provider
 │   ├── openai.go      # OpenAI provider
 │   └── ollama.go      # Ollama local provider
 │
 ├── vectorindex/        # HNSW approximate nearest neighbor
-│   └── hnsw.go        # Pure Go HNSW implementation
+│   ├── hnsw.go        # Pure Go HNSW implementation
+│   └── hnsw_test.go   # HNSW index tests
 │
 ├── search/             # Search functionality
 │   ├── types.go       # Minimal SearchResult for internal fusion
 │   ├── query.go       # Snippet extraction utility
 │   ├── hybrid.go      # Hybrid BM25 + vector search
-│   └── fusion.go      # RRF score fusion
+│   ├── fusion.go      # RRF score fusion
+│   └── fusion_test.go # RRF fusion tests
 │
 ├── internal/           # Internal shared packages
 │   └── nlp/           # Natural language processing
-│       ├── stopwords.go  # Shared stop word detection
-│       └── stemmer.go    # Shared Porter stemmer
+│       ├── stopwords.go  # Shared stop word detection (~175 words)
+│       ├── stemmer.go    # Shared Porter stemmer (deterministic)
+│       └── nlp_test.go   # Stemmer and stop word tests
 │
 ├── cmd/                # CLI tools
 │   └── test_pdf/
@@ -809,9 +816,14 @@ if docuindex.IsCustomDataError(err) { ... }
 ## Security Limits
 
 - `MaxStringLength`: 100MB (PDF string limit)
-- `MaxDecompressedSize`: 500MB (stream limit)
+- `MaxDecompressedSize`: 500MB (stream limit, enforced via io.LimitReader)
 - `MaxRecursionDepth`: 100 (prevents stack overflow)
 - `MaxPredictorColumns`: 100,000
+- `MaxPredictorColors`: 100
+- `MaxPredictorBits`: 32
+- `MaxGraphicsStateDepth`: 1,000 (graphics state stack limit)
+- `MaxFormXObjectDepth`: 50 (nested form XObject recursion limit)
+- `MaxOperandStackSize`: 10,000 (operand stack limit in PDF content interpreter)
 - Cycle detection in object references and page trees
 
 ## Concurrency Model
