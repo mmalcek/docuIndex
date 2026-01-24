@@ -2,6 +2,15 @@
 
 Pure Go package for parsing PDF and DOCX files into AI-searchable format with unified SQLite storage and optional semantic search via embeddings.
 
+## Documentation Guidelines
+
+**IMPORTANT:** When making changes to the public API (new functions, options, types, or behavioral changes):
+1. Update this file (CLAUDE.md) with technical details
+2. Update README.md with user-facing documentation and examples
+3. Both files must stay in sync with the actual implementation
+
+README.md is the primary user documentation - keep it comprehensive and up-to-date.
+
 ## Project Structure
 
 ```
