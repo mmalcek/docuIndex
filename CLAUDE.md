@@ -249,6 +249,8 @@ CREATE TABLE document_tags (
 | `HNSWConfig` | HNSW vector index configuration (M, EfConst, EfSearch) |
 | `StoreHealth` | Health check results (HNSWSynced, IncompleteEmbeddings, PendingEmbeddings, counts) |
 | `BackgroundEmbeddingStatus` | Status of background embedding (Running, DocumentsTotal, DocumentsDone, Progress()) |
+| `SourceStats` | Per-source statistics (DocumentCount, TotalBlocks, TotalVectors, MissingVectors, DocsWithIssues) |
+| `SourceStatsDocIssue` | Document with incomplete embeddings (ID, Name, TotalBlocks, EmbeddedBlocks) |
 
 ## Public API
 
@@ -533,6 +535,19 @@ err := store.ResumeAllIncompleteEmbeddings()
 
 // Repair all detected issues (rebuilds HNSW, resumes embeddings)
 err := store.Repair()
+
+// Get statistics for a specific source (documents, blocks, vectors, missing)
+stats, err := store.GetSourceStats("crm")
+// stats.Source         - source name
+// stats.DocumentCount  - number of documents
+// stats.TotalBlocks    - embeddable blocks
+// stats.TotalVectors   - embedded blocks
+// stats.MissingVectors - blocks without embeddings
+// stats.DocsWithIssues - documents with incomplete embeddings
+
+// Repair documents with missing block embeddings (based on actual counts, not status)
+repaired, err := store.RepairAllMissingBlockEmbeddings()
+// repaired - number of documents that were repaired
 ```
 
 ## Configuration Options
@@ -808,6 +823,8 @@ go run main.go detect-intent "summarize this"  # Detect query intent type
 | Filter by negated tag values | `sqlite/tags.go` GetDocumentIDsByTags() with `!` prefix |
 | Diversify search results | `options.go` WithDiversify() |
 | Enable search diagnostics | `options.go` WithDiagnostics() |
+| Get per-source statistics | `docuindex.go` GetSourceStats() |
+| Repair missing block embeddings | `docuindex.go` RepairAllMissingBlockEmbeddings() |
 
 ## Dependencies
 

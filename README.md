@@ -675,6 +675,45 @@ fmt.Printf("Last migration: %s\n", info.LastMigration)
 // - LastMigration  time.Time - when last schema migration was applied
 ```
 
+### Source Statistics
+
+Get statistics for a specific data source (useful for monitoring import health):
+
+```go
+stats, err := store.GetSourceStats("crm")
+
+fmt.Printf("Source: %s\n", stats.Source)
+fmt.Printf("Documents: %d\n", stats.DocumentCount)
+fmt.Printf("Total blocks: %d\n", stats.TotalBlocks)
+fmt.Printf("Embedded: %d\n", stats.TotalVectors)
+fmt.Printf("Missing embeddings: %d\n", stats.MissingVectors)
+
+// List documents with incomplete embeddings
+for _, doc := range stats.DocsWithIssues {
+    fmt.Printf("  %s: %d/%d blocks embedded\n",
+        doc.Name, doc.EmbeddedBlocks, doc.TotalBlocks)
+}
+
+// SourceStats fields:
+// - Source         string   - source identifier
+// - DocumentCount  int      - number of documents
+// - TotalBlocks    int      - embeddable blocks (text, heading, custom)
+// - TotalVectors   int      - blocks with embeddings
+// - MissingVectors int      - blocks without embeddings
+// - DocsWithIssues []SourceStatsDocIssue - documents needing attention
+```
+
+### Health Check & Recovery
+
+Repair documents where embedding status is marked complete but blocks are missing vectors:
+
+```go
+// Find and repair documents with missing block embeddings
+// (checks actual counts, not embed_status field)
+repaired, err := store.RepairAllMissingBlockEmbeddings()
+fmt.Printf("Repaired %d documents\n", repaired)
+```
+
 ## Recommended Design Patterns
 
 ### Bulk Import (Large Datasets)

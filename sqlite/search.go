@@ -203,7 +203,7 @@ func (s *Store) Search(query string, opts *SearchOptions) (*SearchResults, error
 	}
 
 	// Get global statistics
-	totalDocs, avgDocLen, err := s.getGlobalStats()
+	totalDocs, avgDocLen, globalAvgBlockLen, err := s.getGlobalStats()
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +232,7 @@ func (s *Store) Search(query string, opts *SearchOptions) (*SearchResults, error
 
 		// Get postings for this term
 		rows, err := s.db.Query(`
-			SELECT st.document_id, st.block_id, st.term_frequency, st.positions, ds.total_terms
+			SELECT st.document_id, st.block_id, st.term_frequency, st.positions, ds.avg_block_length
 			FROM search_terms st
 			JOIN document_stats ds ON st.document_id = ds.document_id
 			WHERE st.term = ?
@@ -244,9 +244,9 @@ func (s *Store) Search(query string, opts *SearchOptions) (*SearchResults, error
 		for rows.Next() {
 			var docID, blockID, positionsJSON string
 			var tf float64
-			var docLen int
+			var docAvgBlockLen float64
 
-			if err := rows.Scan(&docID, &blockID, &tf, &positionsJSON, &docLen); err != nil {
+			if err := rows.Scan(&docID, &blockID, &tf, &positionsJSON, &docAvgBlockLen); err != nil {
 				continue
 			}
 
@@ -255,9 +255,32 @@ func (s *Store) Search(query string, opts *SearchOptions) (*SearchResults, error
 				continue
 			}
 
-			// Calculate BM25 score
+			// Recover block length from term frequency and position count.
+			// During indexing: tf = termOccurrences / totalBlockTokens
+			// Therefore: totalBlockTokens = termOccurrences / tf = posCount / tf
+			// Example: term appears 3 times in 30-token block → tf=0.1, blockLen=3/0.1=30
+			var posArr []int
+			json.Unmarshal([]byte(positionsJSON), &posArr)
+			posCount := len(posArr)
+
+			blockLen := float64(posCount)
+			if tf > 0 {
+				blockLen = float64(posCount) / tf
+			}
+
+			// Use document's average block length, fall back to global average, then to reasonable default
+			avgBlockLen := docAvgBlockLen
+			if avgBlockLen <= 0 {
+				avgBlockLen = globalAvgBlockLen
+			}
+			if avgBlockLen <= 0 {
+				avgBlockLen = avgDocLen / 10 // last resort fallback
+			}
+
+			// Calculate BM25 score using BLOCK-level length normalization
+			// This ensures blocks from large documents aren't unfairly penalized
 			idf := math.Log((float64(totalDocs)-float64(df)+0.5)/(float64(df)+0.5) + 1)
-			tfNorm := (tf * (bm25K1 + 1)) / (tf + bm25K1*(1-bm25B+bm25B*(float64(docLen)/avgDocLen)))
+			tfNorm := (tf * (bm25K1 + 1)) / (tf + bm25K1*(1-bm25B+bm25B*(blockLen/avgBlockLen)))
 			score := idf * tfNorm
 
 			// Accumulate scores
@@ -377,23 +400,30 @@ func (s *Store) DeleteDocumentIndex(documentID string) error {
 }
 
 // getGlobalStats retrieves global index statistics
-func (s *Store) getGlobalStats() (totalDocs int, avgDocLen float64, err error) {
+func (s *Store) getGlobalStats() (totalDocs int, avgDocLen float64, avgBlockLen float64, err error) {
 	err = s.db.QueryRow(`SELECT value FROM index_stats WHERE key = 'total_documents'`).Scan(&totalDocs)
 	if err == sql.ErrNoRows {
-		return 0, 0, nil
+		return 0, 0, 0, nil
 	}
 	if err != nil {
-		return 0, 0, fmt.Errorf("get total docs: %w", err)
+		return 0, 0, 0, fmt.Errorf("get total docs: %w", err)
 	}
 
 	err = s.db.QueryRow(`SELECT value FROM index_stats WHERE key = 'avg_doc_length'`).Scan(&avgDocLen)
 	if err == sql.ErrNoRows {
 		avgDocLen = 0
 	} else if err != nil {
-		return 0, 0, fmt.Errorf("get avg doc length: %w", err)
+		return 0, 0, 0, fmt.Errorf("get avg doc length: %w", err)
 	}
 
-	return totalDocs, avgDocLen, nil
+	err = s.db.QueryRow(`SELECT value FROM index_stats WHERE key = 'avg_block_length'`).Scan(&avgBlockLen)
+	if err == sql.ErrNoRows {
+		avgBlockLen = 0
+	} else if err != nil {
+		return 0, 0, 0, fmt.Errorf("get avg block length: %w", err)
+	}
+
+	return totalDocs, avgDocLen, avgBlockLen, nil
 }
 
 // updateGlobalStats updates global index statistics
@@ -414,6 +444,16 @@ func updateGlobalStats(tx *sql.Tx) error {
 		}
 	}
 
+	// Calculate global average block length (weighted average across all documents)
+	var avgBlockLen float64
+	if totalDocs > 0 {
+		err = tx.QueryRow(`SELECT AVG(avg_block_length) FROM document_stats WHERE avg_block_length > 0`).Scan(&avgBlockLen)
+		if err != nil {
+			// Fallback to reasonable default
+			avgBlockLen = 100
+		}
+	}
+
 	// Update stats
 	_, err = tx.Exec(`INSERT OR REPLACE INTO index_stats (key, value) VALUES ('total_documents', ?)`, totalDocs)
 	if err != nil {
@@ -423,6 +463,11 @@ func updateGlobalStats(tx *sql.Tx) error {
 	_, err = tx.Exec(`INSERT OR REPLACE INTO index_stats (key, value) VALUES ('avg_doc_length', ?)`, avgLen)
 	if err != nil {
 		return fmt.Errorf("update avg length: %w", err)
+	}
+
+	_, err = tx.Exec(`INSERT OR REPLACE INTO index_stats (key, value) VALUES ('avg_block_length', ?)`, avgBlockLen)
+	if err != nil {
+		return fmt.Errorf("update avg block length: %w", err)
 	}
 
 	return nil

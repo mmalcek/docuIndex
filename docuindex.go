@@ -2569,6 +2569,20 @@ type StoreStats struct {
 	StorageBytes  int64 `json:"storage_bytes"`
 }
 
+// SourceStats is an alias to sqlite.SourceStats for API compatibility
+type SourceStats = sqlite.SourceStats
+
+// SourceStatsDocIssue is an alias to sqlite.SourceStatsDocIssue for API compatibility
+type SourceStatsDocIssue = sqlite.SourceStatsDocIssue
+
+// GetSourceStats returns statistics for a specific source (e.g., "bugtrack", "knowledgebase", "freshdesk")
+func (s *Store) GetSourceStats(source string) (*SourceStats, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.db.GetSourceStats(source)
+}
+
 // DatabaseInfo returns information about the database schema and version
 func (s *Store) DatabaseInfo() (*DatabaseInfo, error) {
 	s.mu.RLock()
@@ -3453,6 +3467,37 @@ func (s *Store) ResumeAllIncompleteEmbeddings() error {
 	}
 
 	return nil
+}
+
+// RepairAllMissingBlockEmbeddings finds and embeds all blocks that are missing vector embeddings.
+// Unlike ResumeAllIncompleteEmbeddings, this checks actual block/vector counts rather than
+// relying on embed_status field. Use this to repair documents where embedding completed but
+// some blocks are still missing vectors.
+func (s *Store) RepairAllMissingBlockEmbeddings() (int, error) {
+	if s.embedder == nil {
+		return 0, fmt.Errorf("embedding provider not configured")
+	}
+
+	// Get documents with missing block embeddings (sqlite store handles its own mutex)
+	docs, err := s.db.GetDocumentsWithMissingBlockEmbeddings()
+	if err != nil {
+		return 0, fmt.Errorf("get documents with missing embeddings: %w", err)
+	}
+
+	if len(docs) == 0 {
+		return 0, nil
+	}
+
+	repaired := 0
+	for _, doc := range docs {
+		if err := s.ResumeEmbedding(doc.ID); err != nil {
+			log.Printf("[RepairEmbeddings] Error repairing %s: %v", doc.Name, err)
+			continue
+		}
+		repaired++
+	}
+
+	return repaired, nil
 }
 
 // CheckHealth performs a comprehensive consistency check on the store.

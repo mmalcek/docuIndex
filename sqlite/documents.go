@@ -553,3 +553,135 @@ func (s *Store) GetDocumentsWithIncompleteEmbeddings() ([]DocumentInfo, error) {
 
 	return docs, rows.Err()
 }
+
+// SourceStats contains statistics for a specific source
+type SourceStats struct {
+	Source         string                `json:"source"`
+	DocumentCount  int                   `json:"document_count"`
+	TotalBlocks    int                   `json:"total_blocks"`
+	TotalVectors   int                   `json:"total_vectors"`
+	MissingVectors int                   `json:"missing_vectors"` // Blocks without embeddings
+	DocsWithIssues []SourceStatsDocIssue `json:"docs_with_issues,omitempty"`
+}
+
+// SourceStatsDocIssue represents a document with incomplete embeddings
+type SourceStatsDocIssue struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	TotalBlocks    int    `json:"total_blocks"`
+	EmbeddedBlocks int    `json:"embedded_blocks"`
+}
+
+// GetSourceStats returns statistics for a specific source
+func (s *Store) GetSourceStats(source string) (*SourceStats, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	stats := &SourceStats{Source: source}
+
+	// Count documents for this source
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM documents WHERE source = ?
+	`, source).Scan(&stats.DocumentCount)
+	if err != nil {
+		return nil, fmt.Errorf("count documents for source %s: %w", source, err)
+	}
+
+	// Count total EMBEDDABLE blocks for this source (text, heading, custom with content)
+	err = s.db.QueryRow(`
+		SELECT COUNT(*)
+		FROM content_blocks cb
+		JOIN documents d ON d.id = cb.document_id
+		WHERE d.source = ?
+		  AND cb.type IN ('text', 'heading', 'custom')
+		  AND cb.content IS NOT NULL AND cb.content != ''
+	`, source).Scan(&stats.TotalBlocks)
+	if err != nil {
+		return nil, fmt.Errorf("count blocks for source %s: %w", source, err)
+	}
+
+	// Count vectors (embedded blocks) for this source
+	// Note: block_id is NOT unique across documents (e.g., 'header', 'fulltext' repeat),
+	// so we count all vector rows (each document+block combination is unique via composite PK)
+	err = s.db.QueryRow(`
+		SELECT COUNT(*)
+		FROM vectors v
+		JOIN documents d ON d.id = v.document_id
+		WHERE d.source = ?
+	`, source).Scan(&stats.TotalVectors)
+	if err != nil {
+		return nil, fmt.Errorf("count vectors for source %s: %w", source, err)
+	}
+
+	stats.MissingVectors = stats.TotalBlocks - stats.TotalVectors
+
+	// Find documents with incomplete embeddings (only embeddable blocks)
+	// Note: We count vectors by checking if the join found a match (v.document_id IS NOT NULL)
+	// since block_id is not unique across documents
+	rows, err := s.db.Query(`
+		SELECT d.id, d.name,
+		       COUNT(DISTINCT cb.id) as total_blocks,
+		       SUM(CASE WHEN v.document_id IS NOT NULL THEN 1 ELSE 0 END) as embedded_blocks
+		FROM documents d
+		JOIN content_blocks cb ON cb.document_id = d.id
+		LEFT JOIN vectors v ON v.block_id = cb.id AND v.document_id = d.id
+		WHERE d.source = ?
+		  AND cb.type IN ('text', 'heading', 'custom')
+		  AND cb.content IS NOT NULL AND cb.content != ''
+		GROUP BY d.id, d.name
+		HAVING SUM(CASE WHEN v.document_id IS NOT NULL THEN 1 ELSE 0 END) < COUNT(DISTINCT cb.id)
+	`, source)
+	if err != nil {
+		return nil, fmt.Errorf("query incomplete embeddings for source %s: %w", source, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var issue SourceStatsDocIssue
+		if err := rows.Scan(&issue.ID, &issue.Name, &issue.TotalBlocks, &issue.EmbeddedBlocks); err != nil {
+			continue
+		}
+		stats.DocsWithIssues = append(stats.DocsWithIssues, issue)
+	}
+
+	return stats, rows.Err()
+}
+
+// GetDocumentsWithMissingBlockEmbeddings returns documents that have blocks without embeddings.
+// Unlike GetDocumentsWithIncompleteEmbeddings, this checks actual block/vector counts
+// rather than relying on embed_status field.
+// Note: Caller must NOT hold the mutex as this function acquires it.
+func (s *Store) GetDocumentsWithMissingBlockEmbeddings() ([]SourceStatsDocIssue, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Find documents where vector count < embeddable block count
+	// Note: We use SUM(CASE...) to count vectors because block_id is not unique across documents
+	rows, err := s.db.Query(`
+		SELECT d.id, d.name,
+		       COUNT(DISTINCT cb.id) as total_blocks,
+		       SUM(CASE WHEN v.document_id IS NOT NULL THEN 1 ELSE 0 END) as embedded_blocks
+		FROM documents d
+		JOIN content_blocks cb ON cb.document_id = d.id
+		LEFT JOIN vectors v ON v.block_id = cb.id AND v.document_id = d.id
+		WHERE cb.type IN ('text', 'heading', 'custom')
+		  AND cb.content IS NOT NULL AND cb.content != ''
+		GROUP BY d.id, d.name
+		HAVING SUM(CASE WHEN v.document_id IS NOT NULL THEN 1 ELSE 0 END) < COUNT(DISTINCT cb.id)
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query documents with missing embeddings: %w", err)
+	}
+	defer rows.Close()
+
+	var docs []SourceStatsDocIssue
+	for rows.Next() {
+		var doc SourceStatsDocIssue
+		if err := rows.Scan(&doc.ID, &doc.Name, &doc.TotalBlocks, &doc.EmbeddedBlocks); err != nil {
+			continue
+		}
+		docs = append(docs, doc)
+	}
+
+	return docs, rows.Err()
+}

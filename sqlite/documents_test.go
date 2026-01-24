@@ -539,3 +539,159 @@ func TestParseTimestampOrZero(t *testing.T) {
 		t.Error("Empty string should return zero time")
 	}
 }
+
+func TestGetSourceStats(t *testing.T) {
+	store := setupTestStore(t)
+	defer store.Close()
+
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// Create documents with different sources
+	docs := []struct {
+		id     string
+		source string
+		blocks []ContentBlock
+	}{
+		{
+			id:     "doc1",
+			source: "crm",
+			blocks: []ContentBlock{
+				{ID: "b1", Type: "text", Content: "CRM content block one"},
+				{ID: "b2", Type: "text", Content: "CRM content block two"},
+			},
+		},
+		{
+			id:     "doc2",
+			source: "crm",
+			blocks: []ContentBlock{
+				{ID: "b1", Type: "text", Content: "Another CRM document"},
+			},
+		},
+		{
+			id:     "doc3",
+			source: "knowledgebase",
+			blocks: []ContentBlock{
+				{ID: "b1", Type: "text", Content: "KB content"},
+			},
+		},
+	}
+
+	for _, d := range docs {
+		doc := &Document{
+			Info: DocumentInfo{
+				ID:        d.id,
+				Name:      d.id + ".pdf",
+				Format:    "pdf",
+				Source:    d.source,
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+			Blocks: d.blocks,
+		}
+		if err := store.SaveDocument(doc); err != nil {
+			t.Fatalf("SaveDocument failed: %v", err)
+		}
+	}
+
+	// Test stats for "crm" source
+	stats, err := store.GetSourceStats("crm")
+	if err != nil {
+		t.Fatalf("GetSourceStats failed: %v", err)
+	}
+
+	if stats.Source != "crm" {
+		t.Errorf("Source = %q, want %q", stats.Source, "crm")
+	}
+	if stats.DocumentCount != 2 {
+		t.Errorf("DocumentCount = %d, want 2", stats.DocumentCount)
+	}
+	if stats.TotalBlocks != 3 {
+		t.Errorf("TotalBlocks = %d, want 3", stats.TotalBlocks)
+	}
+	// No vectors yet, so MissingVectors should equal TotalBlocks
+	if stats.MissingVectors != 3 {
+		t.Errorf("MissingVectors = %d, want 3", stats.MissingVectors)
+	}
+
+	// Test stats for "knowledgebase" source
+	kbStats, err := store.GetSourceStats("knowledgebase")
+	if err != nil {
+		t.Fatalf("GetSourceStats failed: %v", err)
+	}
+	if kbStats.DocumentCount != 1 {
+		t.Errorf("KB DocumentCount = %d, want 1", kbStats.DocumentCount)
+	}
+
+	// Test stats for non-existent source
+	emptyStats, err := store.GetSourceStats("nonexistent")
+	if err != nil {
+		t.Fatalf("GetSourceStats failed: %v", err)
+	}
+	if emptyStats.DocumentCount != 0 {
+		t.Errorf("Nonexistent source DocumentCount = %d, want 0", emptyStats.DocumentCount)
+	}
+}
+
+func TestGetDocumentsWithMissingBlockEmbeddings(t *testing.T) {
+	store := setupTestStore(t)
+	defer store.Close()
+
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// Create documents with embeddable blocks
+	doc1 := &Document{
+		Info: DocumentInfo{
+			ID:        "doc1",
+			Name:      "doc1.pdf",
+			Format:    "pdf",
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+		Blocks: []ContentBlock{
+			{ID: "b1", Type: "text", Content: "Some text content"},
+			{ID: "b2", Type: "text", Content: "More text content"},
+		},
+	}
+	doc2 := &Document{
+		Info: DocumentInfo{
+			ID:        "doc2",
+			Name:      "doc2.pdf",
+			Format:    "pdf",
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+		Blocks: []ContentBlock{
+			{ID: "b1", Type: "text", Content: "Document two content"},
+		},
+	}
+
+	store.SaveDocument(doc1)
+	store.SaveDocument(doc2)
+
+	// Both documents should have missing embeddings
+	docs, err := store.GetDocumentsWithMissingBlockEmbeddings()
+	if err != nil {
+		t.Fatalf("GetDocumentsWithMissingBlockEmbeddings failed: %v", err)
+	}
+
+	if len(docs) != 2 {
+		t.Errorf("Expected 2 documents with missing embeddings, got %d", len(docs))
+	}
+
+	// Verify doc1 has correct counts
+	var foundDoc1 bool
+	for _, d := range docs {
+		if d.ID == "doc1" {
+			foundDoc1 = true
+			if d.TotalBlocks != 2 {
+				t.Errorf("doc1 TotalBlocks = %d, want 2", d.TotalBlocks)
+			}
+			if d.EmbeddedBlocks != 0 {
+				t.Errorf("doc1 EmbeddedBlocks = %d, want 0", d.EmbeddedBlocks)
+			}
+		}
+	}
+	if !foundDoc1 {
+		t.Error("doc1 should be in the results")
+	}
+}
