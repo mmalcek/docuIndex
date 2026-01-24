@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -178,8 +179,17 @@ func retryWithBackoff(ctx context.Context, maxRetries int, baseDelay time.Durati
 				return err
 			}
 
+			// Log rate limiting
+			if errors.Is(err, ErrRateLimited) {
+				log.Printf("[Embedding] Rate limited, retry %d/%d after %v", i+1, maxRetries, delay)
+			}
+
 			// Wait before retry (with exponential backoff)
 			if i < maxRetries {
+				// Cap delay at 30 seconds to avoid excessive waits
+				if delay > 30*time.Second {
+					delay = 30 * time.Second
+				}
 				select {
 				case <-ctx.Done():
 					return ctx.Err()

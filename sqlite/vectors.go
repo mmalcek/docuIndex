@@ -176,6 +176,40 @@ func (s *Store) GetVectorCount() (int, error) {
 	return count, nil
 }
 
+// GetVectorsBatched retrieves vectors in batches for memory-efficient processing.
+// Returns vectors starting from offset, limited to batchSize.
+// Use this for streaming HNSW index building to avoid OOM.
+func (s *Store) GetVectorsBatched(offset, batchSize int) ([]VectorItem, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query(`
+		SELECT block_id, document_id, vector, model FROM vectors
+		ORDER BY document_id, block_id
+		LIMIT ? OFFSET ?
+	`, batchSize, offset)
+	if err != nil {
+		return nil, fmt.Errorf("query vectors batch: %w", err)
+	}
+	defer rows.Close()
+
+	var items []VectorItem
+	for rows.Next() {
+		var item VectorItem
+		var vectorBlob []byte
+
+		err := rows.Scan(&item.BlockID, &item.DocumentID, &vectorBlob, &item.Model)
+		if err != nil {
+			return nil, fmt.Errorf("scan vector: %w", err)
+		}
+
+		item.Vector = bytesToVector(vectorBlob)
+		items = append(items, item)
+	}
+
+	return items, rows.Err()
+}
+
 // GetVectorCountForDocument returns the vector count for a specific document
 func (s *Store) GetVectorCountForDocument(documentID string) (int, error) {
 	s.mu.RLock()

@@ -470,11 +470,19 @@ docs, err := store.IndexCustomDataBatch(allData,
 // Get documents that need embeddings (for resumable maintenance tasks)
 pending, err := store.GetDocumentsWithoutEmbeddings()
 
+// Get count of pending documents (memory efficient for status displays)
+count, err := store.GetPendingDocumentCount()
+
 // Embed specific documents by ID (HNSW saved once at end)
 err := store.EmbedDocuments(docID1, docID2, ...)
 
 // Embed ALL documents that don't have embeddings yet (HNSW saved once at end)
 err := store.EmbedPendingDocuments()
+
+// Embed with streaming for large document sets (10K+) to avoid OOM
+err := store.EmbedDocumentsStreaming(100, func(completed, total int) {
+    fmt.Printf("Progress: %d/%d documents\n", completed, total)
+})
 
 // === Background Embedding (Non-blocking) ===
 
@@ -531,6 +539,8 @@ docuindex.WithStemming(bool)           // Porter stemming (default: true)
 docuindex.WithStopWords(bool)          // Filter stop words (default: true)
 docuindex.WithDedupCheck(bool)         // Enable duplicate detection on indexing
 docuindex.WithHNSWConfig(HNSWConfig)   // Configure HNSW index (M, EfConst, EfSearch)
+docuindex.WithMaxHNSWVectors(int)      // Max vectors for HNSW (0=unlimited, exceeds=brute force). Default: 100000
+docuindex.WithEmbeddingChunking(maxChars, overlap int) // Configure chunking for long texts (default: 24000 chars, 200 overlap)
 ```
 
 ### Search Options
@@ -769,8 +779,12 @@ go run main.go detect-intent "summarize this"  # Detect query intent type
 | Bump library version | `version.go` Version constant |
 | Defer embedding during index | `options.go` WithDeferEmbedding() (works with all Index* functions) |
 | Configure HNSW parameters | `options.go` WithHNSWConfig() |
+| Limit HNSW memory usage | `options.go` WithMaxHNSWVectors() |
+| Configure text chunking | `options.go` WithEmbeddingChunking() |
 | Find unprocessed documents | `docuindex.go` GetDocumentsWithoutEmbeddings() |
+| Get pending document count | `docuindex.go` GetPendingDocumentCount() |
 | Batch embed documents | `docuindex.go` EmbedPendingDocuments(), EmbedDocuments() |
+| Stream embed large batches | `docuindex.go` EmbedDocumentsStreaming() |
 | Background embedding | `docuindex.go` EmbedPendingDocumentsAsync(), IsBackgroundRunning() |
 | Check background status | `docuindex.go` GetBackgroundStatus(), WaitForBackground() |
 | Cancel background work | `docuindex.go` CancelBackground() |
@@ -869,6 +883,14 @@ if docuindex.IsCustomDataError(err) { ... }
 | <10k | BM25 or Brute-force vector | <10ms |
 | 10k-100k | BM25 + HNSW | <50ms |
 | >100k | BM25 + HNSW (tuned) | May need optimization |
+
+### Large Document Handling
+
+**HNSW Memory Limits:** By default, HNSW index is limited to 100K vectors (~1GB memory). When exceeded, the library automatically falls back to brute-force SQLite search (slower but works). Configure with `WithMaxHNSWVectors(n)`.
+
+**Text Chunking:** Long text blocks are automatically split into chunks for embedding (default: 24K chars, 200 overlap). Chunk vectors use IDs like `blockID#0`, `blockID#1`. When retrieving blocks, the `#N` suffix is automatically stripped to get the original content. Configure with `WithEmbeddingChunking(maxChars, overlap)`.
+
+**Streaming Embedding:** For 10K+ documents, use `EmbedDocumentsStreaming()` which processes documents one at a time with progress callbacks, avoiding OOM.
 
 ## Current Limitations
 

@@ -30,7 +30,12 @@ type storeConfig struct {
 	NGramSize       int  // N-gram size (default 3)
 
 	// HNSW settings
-	HNSWConfig *HNSWConfig // HNSW index configuration
+	HNSWConfig     *HNSWConfig // HNSW index configuration
+	MaxHNSWVectors int         // Max vectors for HNSW (0=unlimited, exceeds=use brute force). Default: 100000
+
+	// Embedding chunking settings (for long texts that exceed model token limits)
+	MaxChunkChars int // Max characters per chunk (default: 24000 = ~6000 tokens)
+	ChunkOverlap  int // Overlap between chunks in characters (default: 200)
 }
 
 func defaultStoreConfig() *storeConfig {
@@ -45,6 +50,7 @@ func defaultStoreConfig() *storeConfig {
 		EnableStopWords:  true,
 		IndexNGrams:      false,
 		NGramSize:        3,
+		MaxHNSWVectors:   100000, // Default 100K vectors max for HNSW (~1GB memory)
 	}
 }
 
@@ -125,6 +131,28 @@ func WithDedupCheck(enabled bool) StoreOption {
 func WithHNSWConfig(cfg HNSWConfig) StoreOption {
 	return func(c *storeConfig) {
 		c.HNSWConfig = &cfg
+	}
+}
+
+// WithMaxHNSWVectors sets the maximum number of vectors for HNSW index.
+// If the vector count exceeds this limit, HNSW is disabled and brute-force
+// SQLite search is used instead. This prevents OOM for large datasets.
+// Default: 100000 (~1GB memory). Set to 0 for unlimited (use with caution).
+func WithMaxHNSWVectors(max int) StoreOption {
+	return func(c *storeConfig) {
+		c.MaxHNSWVectors = max
+	}
+}
+
+// WithEmbeddingChunking configures text chunking for long content that exceeds
+// embedding model token limits. Texts longer than maxChars will be split into
+// multiple chunks with the specified overlap to maintain context.
+// Default: maxChars=24000 (~6000 tokens), overlap=200 characters.
+// Set maxChars=0 to disable chunking (texts will be sent as-is to embedding API).
+func WithEmbeddingChunking(maxChars, overlap int) StoreOption {
+	return func(c *storeConfig) {
+		c.MaxChunkChars = maxChars
+		c.ChunkOverlap = overlap
 	}
 }
 

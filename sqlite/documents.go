@@ -417,6 +417,67 @@ func (s *Store) GetDocumentsWithoutEmbeddings() ([]DocumentInfo, error) {
 	return docs, rows.Err()
 }
 
+// GetPendingDocumentIDsLimited returns only the IDs of documents without embeddings, with a limit.
+// This is memory-efficient for large document sets - use with EmbedDocumentByID for streaming.
+func (s *Store) GetPendingDocumentIDsLimited(limit int) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	query := `
+		SELECT DISTINCT d.id
+		FROM documents d
+		INNER JOIN content_blocks cb ON cb.document_id = d.id
+		WHERE cb.type IN ('text', 'heading', 'custom')
+		  AND cb.content IS NOT NULL
+		  AND cb.content != ''
+		  AND NOT EXISTS (
+		      SELECT 1 FROM vectors v WHERE v.document_id = d.id
+		  )
+		ORDER BY d.created_at ASC
+		LIMIT ?
+	`
+	rows, err := s.db.Query(query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query pending document IDs: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan document ID: %w", err)
+		}
+		ids = append(ids, id)
+	}
+
+	return ids, rows.Err()
+}
+
+// GetPendingDocumentCount returns the count of documents without embeddings.
+// This is memory-efficient compared to GetDocumentsWithoutEmbeddings - use for status displays.
+func (s *Store) GetPendingDocumentCount() (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(DISTINCT d.id)
+		FROM documents d
+		INNER JOIN content_blocks cb ON cb.document_id = d.id
+		WHERE cb.type IN ('text', 'heading', 'custom')
+		  AND cb.content IS NOT NULL
+		  AND cb.content != ''
+		  AND NOT EXISTS (
+		      SELECT 1 FROM vectors v WHERE v.document_id = d.id
+		  )
+	`).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count pending documents: %w", err)
+	}
+	return count, nil
+}
+
 // GetDocumentsWithIncompleteEmbeddings returns documents that have some but not all blocks embedded.
 // This identifies documents where embedding was interrupted mid-way.
 func (s *Store) GetDocumentsWithIncompleteEmbeddings() ([]DocumentInfo, error) {

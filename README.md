@@ -81,6 +81,8 @@ store, err := docuindex.NewStore("./data",
     docuindex.WithSemanticAnalysis(true),   // Enable heading/section detection
     docuindex.WithStemming(true),           // Enable Porter stemming for search
     docuindex.WithStopWords(true),          // Filter common stop words
+    docuindex.WithMaxHNSWVectors(100000),   // Max vectors for HNSW (default 100K, exceeds=brute force)
+    docuindex.WithEmbeddingChunking(24000, 200), // Chunk long texts (default: 24K chars, 200 overlap)
 )
 ```
 
@@ -705,6 +707,11 @@ docs, err := store.IndexCustomDataBatch(allData,
 
 // Generate embeddings after all documents indexed
 err = store.EmbedPendingDocuments()
+
+// For very large datasets (10K+ documents), use streaming to avoid OOM
+err = store.EmbedDocumentsStreaming(100, func(completed, total int) {
+    fmt.Printf("Progress: %d/%d documents\n", completed, total)
+})
 ```
 
 ### Incremental Sync
@@ -745,11 +752,22 @@ err = store.EmbedPendingDocuments()
 For background processing that survives restarts:
 
 ```go
-// Find documents without embeddings (scheduled task / startup)
-pending, _ := store.GetDocumentsWithoutEmbeddings()
-if len(pending) > 0 {
-    log.Printf("Processing %d pending documents", len(pending))
+// Quick count check (memory efficient)
+count, _ := store.GetPendingDocumentCount()
+if count > 0 {
+    log.Printf("Processing %d pending documents", count)
+
+    // For moderate datasets
     err := store.EmbedPendingDocuments()
+
+    // For large datasets (10K+), use streaming to avoid OOM
+    // err := store.EmbedDocumentsStreaming(100, nil)
+}
+
+// Or get full document info if needed
+pending, _ := store.GetDocumentsWithoutEmbeddings()
+for _, doc := range pending {
+    log.Printf("Pending: %s", doc.Name)
 }
 ```
 
@@ -818,6 +836,61 @@ results, _ := store.Search("important query",
 ```
 
 See [OPTIMISATIONS.md](OPTIMISATIONS.md) for detailed performance tuning guide.
+
+### Large Dataset Considerations
+
+For datasets with 100K+ vectors or very long documents:
+
+#### Memory Management
+
+```go
+// Limit HNSW memory usage (default: 100K vectors ≈ 1GB RAM)
+// When exceeded, automatically falls back to brute-force SQLite search
+store, _ := docuindex.NewStore("./data",
+    docuindex.WithMaxHNSWVectors(100000),  // 0 = unlimited (use with caution)
+)
+
+// Check pending count without loading full documents
+count, _ := store.GetPendingDocumentCount()
+fmt.Printf("%d documents need embeddings\n", count)
+```
+
+#### Streaming Embedding for Large Imports
+
+```go
+// Process 10K+ documents without OOM
+err := store.EmbedDocumentsStreaming(100, func(completed, total int) {
+    fmt.Printf("Embedded %d/%d documents\n", completed, total)
+})
+// - Fetches document IDs in small batches
+// - Processes one document at a time
+// - Saves HNSW index after each batch
+```
+
+#### Text Chunking for Long Content
+
+Long text blocks are automatically split for embedding APIs with token limits:
+
+```go
+// Configure chunking (defaults: 24K chars ≈ 6K tokens, 200 char overlap)
+store, _ := docuindex.NewStore("./data",
+    docuindex.WithEmbeddingChunking(24000, 200),
+)
+// Chunks use IDs like "blockID#0", "blockID#1" internally
+// When retrieving blocks, the #N suffix is automatically stripped
+```
+
+#### HNSW vs Brute-Force Search
+
+| Vector Count | Index Type | Search Speed | Notes |
+|--------------|------------|--------------|-------|
+| < 100K | HNSW | < 50ms | Default, fast approximate search |
+| > 100K | Brute-force | 100-500ms | Automatic fallback, exact results |
+
+The library automatically falls back to SQLite brute-force search when:
+- Vector count exceeds `MaxHNSWVectors` limit
+- HNSW index fails to load
+- HNSW is empty/not initialized
 
 ## Storage Architecture
 

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	// Image format decoders for detectImageDimensions
 	_ "image/gif"
@@ -71,7 +72,13 @@ func NewStore(basePath string, opts ...StoreOption) (*Store, error) {
 		db:     db,
 	}
 
-	// Load or create HNSW index if embeddings are available
+	// Check vector count before loading HNSW to prevent OOM
+	vectorCount, err := db.GetVectorCount()
+	if err != nil {
+		log.Printf("warning: could not get vector count: %v", err)
+	}
+
+	// Load or create HNSW index if within limits
 	hnswPath := filepath.Join(basePath, "hnsw.idx")
 	var hnswCfg *vectorindex.Config
 	if config.HNSWConfig != nil {
@@ -82,9 +89,20 @@ func NewStore(basePath string, opts ...StoreOption) (*Store, error) {
 		}
 	}
 	s.hnsw = vectorindex.NewHNSW(hnswCfg)
-	if _, err := os.Stat(hnswPath); err == nil {
+
+	// Only load HNSW if vector count is within limits
+	if config.MaxHNSWVectors > 0 && vectorCount > config.MaxHNSWVectors {
+		log.Printf("WARNING: Vector count (%d) exceeds MaxHNSWVectors (%d), using brute-force SQLite search instead of HNSW",
+			vectorCount, config.MaxHNSWVectors)
+		// Keep empty HNSW, vectorSearch will fall back to brute-force
+	} else if _, err := os.Stat(hnswPath); err == nil {
 		// Load existing index
-		s.hnsw.LoadFromFile(hnswPath)
+		log.Printf("Loading HNSW index (%d vectors)...", vectorCount)
+		if err := s.hnsw.LoadFromFile(hnswPath); err != nil {
+			log.Printf("WARNING: Failed to load HNSW index: %v, will use brute-force search", err)
+		} else {
+			log.Printf("HNSW index loaded: %d vectors", s.hnsw.Size())
+		}
 	}
 
 	// Initialize hybrid searcher
@@ -98,7 +116,8 @@ func NewStore(basePath string, opts ...StoreOption) (*Store, error) {
 
 // SetEmbeddingProvider configures the embedding provider after store creation.
 // It automatically detects and repairs inconsistencies between the HNSW index
-// and SQLite vectors, rebuilding the index if necessary.
+// and SQLite vectors, rebuilding the index if necessary using streaming to avoid OOM.
+// If vector count exceeds MaxHNSWVectors, HNSW is skipped and brute-force search is used.
 func (s *Store) SetEmbeddingProvider(provider embedding.Provider) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -108,18 +127,31 @@ func (s *Store) SetEmbeddingProvider(provider embedding.Provider) error {
 	// Set up vector search in hybrid searcher
 	s.hybrid.VectorSearch = s.vectorSearch
 
-	// Load all vectors from SQLite (source of truth)
-	vectors, err := s.db.GetAllVectors()
+	// Count vectors in SQLite (memory efficient - no data loaded)
+	sqliteCount, err := s.db.GetVectorCount()
 	if err != nil {
-		return fmt.Errorf("load vectors: %w", err)
+		return fmt.Errorf("count vectors: %w", err)
+	}
+
+	// Check if vector count exceeds HNSW limit
+	if s.config.MaxHNSWVectors > 0 && sqliteCount > s.config.MaxHNSWVectors {
+		log.Printf("WARNING: Vector count (%d) exceeds MaxHNSWVectors (%d), skipping HNSW rebuild. Using brute-force SQLite search.",
+			sqliteCount, s.config.MaxHNSWVectors)
+		// Clear HNSW to ensure it's empty, vectorSearch will fall back to brute-force
+		s.hnsw = vectorindex.NewHNSW(nil)
+		return nil
 	}
 
 	// Check for inconsistency between HNSW and SQLite
 	hnswSize := s.hnsw.Size()
-	sqliteCount := len(vectors)
+
+	if hnswSize == sqliteCount && sqliteCount > 0 {
+		// HNSW is in sync, no rebuild needed
+		log.Printf("HNSW index in sync with SQLite (%d vectors)", sqliteCount)
+		return nil
+	}
 
 	if hnswSize != sqliteCount {
-		// Log warning about inconsistency and auto-repair
 		log.Printf("warning: HNSW index (%d vectors) out of sync with SQLite (%d vectors), rebuilding...",
 			hnswSize, sqliteCount)
 
@@ -135,21 +167,50 @@ func (s *Store) SetEmbeddingProvider(provider embedding.Provider) error {
 		s.hnsw = vectorindex.NewHNSW(hnswCfg)
 	}
 
-	// Rebuild/populate HNSW from SQLite vectors using batch operation
-	if len(vectors) > 0 {
-		hnswItems := make([]vectorindex.VectorItem, len(vectors))
-		for i, v := range vectors {
-			hnswItems[i] = vectorindex.VectorItem{
-				ID:     fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID),
-				Vector: v.Vector,
+	// Rebuild HNSW from SQLite using streaming/batched approach to avoid OOM
+	if sqliteCount > 0 {
+		const batchSize = 1000
+		offset := 0
+		totalAdded := 0
+
+		for {
+			// Load batch of vectors
+			vectors, err := s.db.GetVectorsBatched(offset, batchSize)
+			if err != nil {
+				return fmt.Errorf("load vectors batch at offset %d: %w", offset, err)
+			}
+
+			if len(vectors) == 0 {
+				break // No more vectors
+			}
+
+			// Convert to HNSW items
+			hnswItems := make([]vectorindex.VectorItem, len(vectors))
+			for i, v := range vectors {
+				hnswItems[i] = vectorindex.VectorItem{
+					ID:     fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID),
+					Vector: v.Vector,
+				}
+			}
+
+			// Add batch to HNSW
+			if err := s.hnsw.AddBatch(hnswItems); err != nil {
+				log.Printf("warning: failed to add batch at offset %d to HNSW: %v", offset, err)
+			}
+
+			totalAdded += len(vectors)
+			offset += batchSize
+
+			// Log progress for large rebuilds
+			if totalAdded%10000 == 0 {
+				log.Printf("HNSW rebuild progress: %d/%d vectors", totalAdded, sqliteCount)
 			}
 		}
-		if err := s.hnsw.AddBatch(hnswItems); err != nil {
-			log.Printf("warning: failed to add vectors to HNSW: %v", err)
-		}
+
+		log.Printf("HNSW rebuild completed: %d vectors", totalAdded)
 	}
 
-	// Save rebuilt HNSW to disk if there were changes
+	// Save rebuilt HNSW to disk
 	return s.saveHNSWIndex()
 }
 
@@ -203,6 +264,136 @@ func sourceOrDefault(source, defaultSource string) string {
 		return source
 	}
 	return defaultSource
+}
+
+// chunkText splits long text into smaller chunks with overlap for embedding.
+// If text length is within maxChars, returns the original text as single chunk.
+// Uses rune count (not byte count) to handle Unicode correctly.
+// Tries to break at natural boundaries (paragraphs, sentences, words).
+func chunkText(text string, maxChars, overlap int) []string {
+	runeCount := utf8.RuneCountInString(text)
+	if runeCount <= maxChars {
+		return []string{text}
+	}
+
+	runes := []rune(text)
+	var chunks []string
+	start := 0
+	for start < len(runes) {
+		end := start + maxChars
+		if end > len(runes) {
+			end = len(runes)
+		}
+
+		// Try to break at sentence/paragraph boundary
+		if end < len(runes) {
+			breakPoint := findBreakPointRunes(runes, start, end)
+			if breakPoint > start {
+				end = breakPoint
+			}
+		}
+
+		chunks = append(chunks, string(runes[start:end]))
+
+		// If we've reached the end of text, we're done
+		if end >= len(runes) {
+			break
+		}
+
+		// Move start forward, accounting for overlap
+		newStart := end - overlap
+		if newStart <= start || overlap <= 0 {
+			// No progress would be made, move to end without overlap
+			newStart = end
+		}
+		start = newStart
+	}
+	return chunks
+}
+
+// findBreakPointRunes finds the best break point near the end position.
+// Works with runes for proper Unicode support.
+// Searches backwards for paragraph breaks, sentence ends, newlines, or word boundaries.
+func findBreakPointRunes(runes []rune, start, end int) int {
+	// Search within last 500 runes before end for natural break
+	searchStart := end - 500
+	if searchStart < start {
+		searchStart = start
+	}
+
+	searchText := string(runes[searchStart:end])
+
+	// Try paragraph break first (\n\n)
+	if idx := strings.LastIndex(searchText, "\n\n"); idx >= 0 {
+		return searchStart + utf8.RuneCountInString(searchText[:idx]) + 2
+	}
+	// Try sentence break (. followed by space or newline)
+	if idx := strings.LastIndex(searchText, ". "); idx >= 0 {
+		return searchStart + utf8.RuneCountInString(searchText[:idx]) + 2
+	}
+	if idx := strings.LastIndex(searchText, ".\n"); idx >= 0 {
+		return searchStart + utf8.RuneCountInString(searchText[:idx]) + 2
+	}
+	// Try newline
+	if idx := strings.LastIndex(searchText, "\n"); idx >= 0 {
+		return searchStart + utf8.RuneCountInString(searchText[:idx]) + 1
+	}
+	// Try space (word boundary)
+	if idx := strings.LastIndex(searchText, " "); idx >= 0 {
+		return searchStart + utf8.RuneCountInString(searchText[:idx]) + 1
+	}
+	// No good break point found, use hard cut
+	return end
+}
+
+// embedWithTruncationFallback embeds texts with automatic truncation if token limit is exceeded.
+// Returns the embeddings and potentially truncated texts. Logs warnings when truncation occurs.
+func (s *Store) embedWithTruncationFallback(ctx context.Context, texts []string, docID string) ([][]float32, []string, error) {
+	embeddings, err := s.embedder.Embed(ctx, texts)
+
+	// Handle token limit errors by truncating content
+	if err != nil && strings.Contains(err.Error(), "maximum context length") {
+		log.Printf("WARNING: Token limit exceeded for doc %s, truncating content (original sizes: %v chars)", docID, getTextLengths(texts))
+
+		// Truncate each text by 50% and retry
+		truncatedTexts := make([]string, len(texts))
+		for i, t := range texts {
+			truncateLen := len(t) / 2
+			if truncateLen > 0 {
+				truncatedTexts[i] = t[:truncateLen]
+			} else {
+				truncatedTexts[i] = t
+			}
+		}
+
+		embeddings, err = s.embedder.Embed(ctx, truncatedTexts)
+		if err != nil && strings.Contains(err.Error(), "maximum context length") {
+			// Still failing, try even more aggressive truncation (25%)
+			log.Printf("WARNING: Still exceeding token limit after 50%% truncation for doc %s, trying 25%%", docID)
+			for i, t := range texts {
+				truncateLen := len(t) / 4
+				if truncateLen > 0 {
+					truncatedTexts[i] = t[:truncateLen]
+				}
+			}
+			embeddings, err = s.embedder.Embed(ctx, truncatedTexts)
+		}
+
+		if err == nil {
+			return embeddings, truncatedTexts, nil
+		}
+	}
+
+	return embeddings, texts, err
+}
+
+// getTextLengths returns a slice of text lengths for logging
+func getTextLengths(texts []string) []int {
+	lengths := make([]int, len(texts))
+	for i, t := range texts {
+		lengths[i] = len(t)
+	}
+	return lengths
 }
 
 // IndexDocument indexes a document from a file path
@@ -286,15 +477,33 @@ func (s *Store) IndexDocument(path string, opts ...IndexOption) (*Document, erro
 func (s *Store) embedDocument(doc *Document) error {
 	ctx := context.Background()
 
-	// Collect text blocks
+	// Chunking config with defaults
+	maxChars := s.config.MaxChunkChars
+	if maxChars <= 0 {
+		maxChars = 48000 // Default for models with higher token limits
+	}
+	overlap := s.config.ChunkOverlap
+	if overlap <= 0 {
+		overlap = 200
+	}
+
+	// Collect text blocks with chunking for long content
 	var texts []string
 	var blockIDs []string
 
 	for _, block := range doc.Content.Blocks {
 		if block.Type == BlockTypeText || block.Type == BlockTypeHeading || block.Type == BlockTypeCustom {
 			if len(block.Content) > 0 {
-				texts = append(texts, block.Content)
-				blockIDs = append(blockIDs, block.ID)
+				chunks := chunkText(block.Content, maxChars, overlap)
+				for i, chunk := range chunks {
+					texts = append(texts, chunk)
+					// Use block ID with chunk suffix for multi-chunk blocks
+					if len(chunks) > 1 {
+						blockIDs = append(blockIDs, fmt.Sprintf("%s#%d", block.ID, i))
+					} else {
+						blockIDs = append(blockIDs, block.ID)
+					}
+				}
 			}
 		}
 	}
@@ -303,7 +512,7 @@ func (s *Store) embedDocument(doc *Document) error {
 		return nil
 	}
 
-	// Generate embeddings in batches
+	// Generate embeddings in batches with truncation fallback
 	batchSize := s.embedder.MaxBatchSize()
 	var vectors []sqlite.VectorItem
 
@@ -313,7 +522,7 @@ func (s *Store) embedDocument(doc *Document) error {
 			end = len(texts)
 		}
 
-		embeddings, err := s.embedder.Embed(ctx, texts[i:end])
+		embeddings, usedTexts, err := s.embedWithTruncationFallback(ctx, texts[i:end], doc.Info.ID)
 		if err != nil {
 			return fmt.Errorf("embed batch: %w", err)
 		}
@@ -323,7 +532,7 @@ func (s *Store) embedDocument(doc *Document) error {
 				BlockID:    blockIDs[i+j],
 				DocumentID: doc.Info.ID,
 				Vector:     emb,
-				Text:       texts[i+j],
+				Text:       usedTexts[j],
 				Model:      s.embedder.Name(),
 			})
 		}
@@ -1459,8 +1668,9 @@ func (s *Store) keywordSearch(query string, limit int) ([]hsearch.SearchResult, 
 
 // vectorSearch performs semantic vector search (used by hybrid searcher)
 // ef parameter overrides HNSW efSearch (0 = use default)
+// Falls back to brute-force SQLite search if HNSW is empty/disabled
 func (s *Store) vectorSearch(ctx context.Context, query string, limit int, ef int) ([]hsearch.VectorSearchResult, error) {
-	if s.embedder == nil || s.hnsw == nil {
+	if s.embedder == nil {
 		return nil, nil
 	}
 
@@ -1470,27 +1680,45 @@ func (s *Store) vectorSearch(ctx context.Context, query string, limit int, ef in
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
 
-	// Search HNSW with optional ef override
-	hnswResults, err := s.hnsw.SearchWithEf(queryVector, limit, ef)
-	if err != nil {
-		return nil, fmt.Errorf("HNSW search: %w", err)
-	}
+	var out []hsearch.VectorSearchResult
 
-	// Convert results
-	out := make([]hsearch.VectorSearchResult, 0, len(hnswResults))
-	for _, r := range hnswResults {
-		// Parse document:block ID
-		parts := strings.SplitN(r.ID, ":", 2)
-		if len(parts) != 2 {
-			continue
+	// Use HNSW if available, otherwise fall back to brute-force SQLite search
+	if s.hnsw != nil && s.hnsw.Size() > 0 {
+		// Search HNSW with optional ef override
+		hnswResults, err := s.hnsw.SearchWithEf(queryVector, limit, ef)
+		if err != nil {
+			return nil, fmt.Errorf("HNSW search: %w", err)
 		}
 
-		out = append(out, hsearch.VectorSearchResult{
-			DocumentID: parts[0],
-			BlockID:    parts[1],
-			Score:      r.Score,
-			Distance:   r.Distance,
-		})
+		out = make([]hsearch.VectorSearchResult, 0, len(hnswResults))
+		for _, r := range hnswResults {
+			parts := strings.SplitN(r.ID, ":", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			out = append(out, hsearch.VectorSearchResult{
+				DocumentID: parts[0],
+				BlockID:    parts[1],
+				Score:      r.Score,
+				Distance:   r.Distance,
+			})
+		}
+	} else {
+		// Brute-force SQLite search (slower but no memory overhead)
+		sqliteResults, err := s.db.BruteForceSearch(queryVector, limit, nil)
+		if err != nil {
+			return nil, fmt.Errorf("brute-force search: %w", err)
+		}
+
+		out = make([]hsearch.VectorSearchResult, 0, len(sqliteResults))
+		for _, r := range sqliteResults {
+			out = append(out, hsearch.VectorSearchResult{
+				DocumentID: r.DocumentID,
+				BlockID:    r.BlockID,
+				Score:      r.Score,
+				Distance:   r.Distance,
+			})
+		}
 	}
 
 	return out, nil
@@ -1498,9 +1726,15 @@ func (s *Store) vectorSearch(ctx context.Context, query string, limit int, ef in
 
 // getBlockContent retrieves content for a block (used by hybrid searcher)
 func (s *Store) getBlockContent(docID, blockID string) (content, snippet string, page int, section string, err error) {
+	// Strip chunk suffix if present (e.g., "block123#0" -> "block123")
+	origBlockID := blockID
+	if idx := strings.Index(blockID, "#"); idx >= 0 {
+		blockID = blockID[:idx]
+	}
+
 	block, err := s.db.GetBlockByID(docID, blockID)
 	if err != nil {
-		return "", "", 0, "", err
+		return "", "", 0, "", fmt.Errorf("get block %s (orig: %s): %w", blockID, origBlockID, err)
 	}
 	return block.Content, "", block.Page, block.Section, nil
 }
@@ -1530,6 +1764,11 @@ func (s *Store) GetContext(docID, blockID string, windowSize int) (*ContextResul
 
 // getContextLocked gets context (caller must hold read lock)
 func (s *Store) getContextLocked(docID, blockID string, windowSize int) (*ContextResult, error) {
+	// Strip chunk suffix if present (e.g., "block123#0" -> "block123")
+	if idx := strings.Index(blockID, "#"); idx >= 0 {
+		blockID = blockID[:idx]
+	}
+
 	before, center, after, err := s.db.GetContextBlocks(docID, blockID, windowSize)
 	if err != nil {
 		return nil, err
@@ -2055,15 +2294,33 @@ func (s *Store) indexDOCXWithProgress(path string, config *indexConfig, callback
 func (s *Store) embedDocumentWithProgress(doc *Document, callback ProgressCallback, startTime time.Time) error {
 	ctx := context.Background()
 
-	// Collect text blocks
+	// Chunking config with defaults
+	maxChars := s.config.MaxChunkChars
+	if maxChars <= 0 {
+		maxChars = 48000 // Default for models with higher token limits
+	}
+	overlap := s.config.ChunkOverlap
+	if overlap <= 0 {
+		overlap = 200
+	}
+
+	// Collect text blocks with chunking for long content
 	var texts []string
 	var blockIDs []string
 
 	for _, block := range doc.Content.Blocks {
 		if block.Type == BlockTypeText || block.Type == BlockTypeHeading || block.Type == BlockTypeCustom {
 			if len(block.Content) > 0 {
-				texts = append(texts, block.Content)
-				blockIDs = append(blockIDs, block.ID)
+				chunks := chunkText(block.Content, maxChars, overlap)
+				for i, chunk := range chunks {
+					texts = append(texts, chunk)
+					// Use block ID with chunk suffix for multi-chunk blocks
+					if len(chunks) > 1 {
+						blockIDs = append(blockIDs, fmt.Sprintf("%s#%d", block.ID, i))
+					} else {
+						blockIDs = append(blockIDs, block.ID)
+					}
+				}
 			}
 		}
 	}
@@ -2080,7 +2337,7 @@ func (s *Store) embedDocumentWithProgress(doc *Document, callback ProgressCallba
 		StartTime:    startTime,
 	}
 
-	// Generate embeddings in batches
+	// Generate embeddings in batches with truncation fallback
 	batchSize := s.embedder.MaxBatchSize()
 	var vectors []sqlite.VectorItem
 
@@ -2090,7 +2347,7 @@ func (s *Store) embedDocumentWithProgress(doc *Document, callback ProgressCallba
 			end = len(texts)
 		}
 
-		embeddings, err := s.embedder.Embed(ctx, texts[i:end])
+		embeddings, usedTexts, err := s.embedWithTruncationFallback(ctx, texts[i:end], doc.Info.ID)
 		if err != nil {
 			return fmt.Errorf("embed batch: %w", err)
 		}
@@ -2100,7 +2357,7 @@ func (s *Store) embedDocumentWithProgress(doc *Document, callback ProgressCallba
 				BlockID:    blockIDs[i+j],
 				DocumentID: doc.Info.ID,
 				Vector:     emb,
-				Text:       texts[i+j],
+				Text:       usedTexts[j],
 				Model:      s.embedder.Name(),
 			})
 		}
@@ -2695,6 +2952,15 @@ func (s *Store) GetDocumentsWithoutEmbeddings() ([]*DocumentInfo, error) {
 	return fromSQLiteDocumentInfos(sqliteInfos), nil
 }
 
+// GetPendingDocumentCount returns the count of documents without embeddings.
+// This is memory-efficient - use for status displays instead of GetDocumentsWithoutEmbeddings.
+func (s *Store) GetPendingDocumentCount() (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.db.GetPendingDocumentCount()
+}
+
 // EmbedDocuments generates embeddings for specific documents by ID.
 // This is useful for resumable batch processing.
 // OPTIMIZED: Saves HNSW index only once at the end instead of after each document.
@@ -2787,6 +3053,104 @@ func (s *Store) EmbedPendingDocuments() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.saveHNSWIndex()
+}
+
+// EmbedDocumentsStreaming processes pending documents one at a time with explicit memory management.
+// This is designed for large document sets (10K+) to avoid OOM.
+// Parameters:
+//   - batchSize: Number of document IDs to fetch per database query (recommended: 100)
+//   - onProgress: Optional callback called after each document (completed, total int)
+//
+// The function:
+//   - Fetches document IDs in small batches (memory efficient)
+//   - Processes one document at a time
+//   - Saves HNSW index after each batch
+func (s *Store) EmbedDocumentsStreaming(batchSize int, onProgress func(completed, total int)) error {
+	if s.embedder == nil {
+		return fmt.Errorf("embedding provider not configured")
+	}
+
+	if batchSize <= 0 {
+		batchSize = 100
+	}
+
+	// Get total count upfront for progress reporting
+	s.mu.RLock()
+	totalPending, err := s.db.GetPendingDocumentCount()
+	s.mu.RUnlock()
+	if err != nil {
+		log.Printf("warning: could not get pending document count: %v", err)
+		totalPending = -1 // Fall back to unknown
+	}
+
+	totalEmbedded := 0
+	batchNum := 0
+
+	for {
+		batchNum++
+
+		// Get a batch of pending document IDs only (memory efficient)
+		s.mu.RLock()
+		docIDs, err := s.db.GetPendingDocumentIDsLimited(batchSize)
+		s.mu.RUnlock()
+		if err != nil {
+			return fmt.Errorf("get pending document IDs: %w", err)
+		}
+
+		if len(docIDs) == 0 {
+			break // No more pending documents
+		}
+
+		// Process each document one at a time
+		for _, docID := range docIDs {
+			s.mu.Lock()
+
+			doc, err := s.db.GetDocument(docID)
+			if err != nil {
+				s.mu.Unlock()
+				log.Printf("EmbedDocumentsStreaming: error getting document %s: %v", docID, err)
+				continue // Skip failed documents
+			}
+
+			// Convert to Document for embedDocument
+			mainDoc := &Document{
+				Info: DocumentInfo{
+					ID:   doc.Info.ID,
+					Name: doc.Info.Name,
+				},
+				Content: DocumentContent{
+					Blocks: fromSQLiteBlocks(doc.Blocks),
+				},
+			}
+
+			if err := s.embedDocumentUnlocked(mainDoc); err != nil {
+				s.mu.Unlock()
+				log.Printf("EmbedDocumentsStreaming: error embedding document %s: %v", docID, err)
+				continue // Skip failed documents
+			}
+
+			s.mu.Unlock()
+			totalEmbedded++
+
+			// Call progress callback if provided
+			if onProgress != nil {
+				onProgress(totalEmbedded, totalPending)
+			}
+
+			// Throttle to avoid rate limits (~2 docs/sec for 120K TPM quota)
+			time.Sleep(500 * time.Millisecond)
+		}
+
+		// Save HNSW index after each batch
+		s.mu.Lock()
+		if err := s.saveHNSWIndex(); err != nil {
+			log.Printf("EmbedDocumentsStreaming: error saving HNSW index: %v", err)
+		}
+		s.mu.Unlock()
+	}
+
+	log.Printf("EmbedDocumentsStreaming: completed %d documents in %d batches", totalEmbedded, batchNum)
+	return nil
 }
 
 // EmbedPendingDocumentsAsync starts embedding in background.
@@ -2999,7 +3363,7 @@ func (s *Store) ResumeEmbedding(docID string) error {
 		blockIDs = append(blockIDs, block.ID)
 	}
 
-	// Generate embeddings in batches
+	// Generate embeddings in batches with truncation fallback
 	ctx := context.Background()
 	batchSize := s.embedder.MaxBatchSize()
 	var vectors []sqlite.VectorItem
@@ -3010,7 +3374,7 @@ func (s *Store) ResumeEmbedding(docID string) error {
 			end = len(texts)
 		}
 
-		embeddings, err := s.embedder.Embed(ctx, texts[i:end])
+		embeddings, usedTexts, err := s.embedWithTruncationFallback(ctx, texts[i:end], docID)
 		if err != nil {
 			// Save what we have so far before returning error
 			if len(vectors) > 0 {
@@ -3033,7 +3397,7 @@ func (s *Store) ResumeEmbedding(docID string) error {
 				BlockID:    blockIDs[i+j],
 				DocumentID: docID,
 				Vector:     emb,
-				Text:       texts[i+j],
+				Text:       usedTexts[j],
 				Model:      s.embedder.Name(),
 			})
 		}
@@ -3165,12 +3529,6 @@ func (s *Store) Repair() error {
 			health.HNSWSize, health.SQLiteVectorCount)
 
 		s.mu.Lock()
-		// Get all vectors from SQLite
-		vectors, err := s.db.GetAllVectors()
-		if err != nil {
-			s.mu.Unlock()
-			return fmt.Errorf("get all vectors: %w", err)
-		}
 
 		// Create fresh HNSW index
 		var hnswCfg *vectorindex.Config
@@ -3183,8 +3541,22 @@ func (s *Store) Repair() error {
 		}
 		s.hnsw = vectorindex.NewHNSW(hnswCfg)
 
-		// Rebuild from SQLite using batch operation
-		if len(vectors) > 0 {
+		// Rebuild from SQLite using streaming/batched approach to avoid OOM
+		const batchSize = 1000
+		offset := 0
+		totalAdded := 0
+
+		for {
+			vectors, err := s.db.GetVectorsBatched(offset, batchSize)
+			if err != nil {
+				s.mu.Unlock()
+				return fmt.Errorf("get vectors batch at offset %d: %w", offset, err)
+			}
+
+			if len(vectors) == 0 {
+				break
+			}
+
 			hnswItems := make([]vectorindex.VectorItem, len(vectors))
 			for i, v := range vectors {
 				hnswItems[i] = vectorindex.VectorItem{
@@ -3193,7 +3565,14 @@ func (s *Store) Repair() error {
 				}
 			}
 			if err := s.hnsw.AddBatch(hnswItems); err != nil {
-				log.Printf("warning: failed to add vectors to HNSW: %v", err)
+				log.Printf("warning: failed to add batch at offset %d to HNSW: %v", offset, err)
+			}
+
+			totalAdded += len(vectors)
+			offset += batchSize
+
+			if totalAdded%10000 == 0 {
+				log.Printf("HNSW repair progress: %d/%d vectors", totalAdded, health.SQLiteVectorCount)
 			}
 		}
 
@@ -3203,7 +3582,7 @@ func (s *Store) Repair() error {
 		}
 		s.mu.Unlock()
 
-		log.Printf("info: HNSW index rebuilt with %d vectors", len(vectors))
+		log.Printf("info: HNSW index rebuilt with %d vectors", totalAdded)
 	}
 
 	// Resume incomplete embeddings if embedder is available
@@ -3232,15 +3611,33 @@ func (s *Store) embedDocumentUnlocked(doc *Document) error {
 		return nil
 	}
 
-	// Collect embeddable text blocks
+	// Chunking config with defaults
+	maxChars := s.config.MaxChunkChars
+	if maxChars <= 0 {
+		maxChars = 48000 // Default for models with higher token limits
+	}
+	overlap := s.config.ChunkOverlap
+	if overlap <= 0 {
+		overlap = 200
+	}
+
+	// Collect embeddable text blocks with chunking for long content
 	var texts []string
 	var blockIDs []string
 
 	for _, block := range doc.Content.Blocks {
 		if block.Type == BlockTypeText || block.Type == BlockTypeHeading || block.Type == BlockTypeCustom {
 			if block.Content != "" {
-				texts = append(texts, block.Content)
-				blockIDs = append(blockIDs, block.ID)
+				chunks := chunkText(block.Content, maxChars, overlap)
+				for i, chunk := range chunks {
+					texts = append(texts, chunk)
+					// Use block ID with chunk suffix for multi-chunk blocks
+					if len(chunks) > 1 {
+						blockIDs = append(blockIDs, fmt.Sprintf("%s#%d", block.ID, i))
+					} else {
+						blockIDs = append(blockIDs, block.ID)
+					}
+				}
 			}
 		}
 	}
@@ -3249,7 +3646,7 @@ func (s *Store) embedDocumentUnlocked(doc *Document) error {
 		return nil
 	}
 
-	// Generate embeddings in batches
+	// Generate embeddings in batches with truncation fallback
 	ctx := context.Background()
 	batchSize := s.embedder.MaxBatchSize()
 	var vectors []sqlite.VectorItem
@@ -3260,7 +3657,7 @@ func (s *Store) embedDocumentUnlocked(doc *Document) error {
 			end = len(texts)
 		}
 
-		embeddings, err := s.embedder.Embed(ctx, texts[i:end])
+		embeddings, usedTexts, err := s.embedWithTruncationFallback(ctx, texts[i:end], doc.Info.ID)
 		if err != nil {
 			return fmt.Errorf("generate embeddings: %w", err)
 		}
@@ -3270,7 +3667,7 @@ func (s *Store) embedDocumentUnlocked(doc *Document) error {
 				BlockID:    blockIDs[i+j],
 				DocumentID: doc.Info.ID,
 				Vector:     emb,
-				Text:       texts[i+j],
+				Text:       usedTexts[j],
 				Model:      s.embedder.Name(),
 			})
 		}
@@ -3281,7 +3678,12 @@ func (s *Store) embedDocumentUnlocked(doc *Document) error {
 		return fmt.Errorf("save vectors: %w", err)
 	}
 
-	// Add to HNSW index using batch operation
+	// Add to HNSW index only if within limit (prevents OOM during large embedding runs)
+	// If limit exceeded, vectors are still in SQLite and brute-force search will be used
+	if s.config.MaxHNSWVectors > 0 && s.hnsw.Size()+len(vectors) > s.config.MaxHNSWVectors {
+		return nil
+	}
+
 	hnswItems := make([]vectorindex.VectorItem, len(vectors))
 	for i, v := range vectors {
 		hnswItems[i] = vectorindex.VectorItem{
@@ -3289,6 +3691,7 @@ func (s *Store) embedDocumentUnlocked(doc *Document) error {
 			Vector: v.Vector,
 		}
 	}
+
 	if err := s.hnsw.AddBatch(hnswItems); err != nil {
 		return fmt.Errorf("add vectors to HNSW: %w", err)
 	}
@@ -3339,8 +3742,34 @@ func (s *Store) IndexCustomDataBatch(data []*CustomData, opts ...IndexOption) ([
 			return docs, ErrMissingEntries
 		}
 
-		// Generate document ID
-		docID := uuid.New().String()
+		// Check if document already exists by ExternalID (for upsert behavior)
+		var docID string
+		var isUpdate bool
+		if d.ExternalID != "" {
+			existingDoc, err := s.db.FindBySourceAndExternalID(d.Source, d.ExternalID)
+			if err == nil && existingDoc != nil {
+				docID = existingDoc.ID
+				isUpdate = true
+				// Delete old vectors for this document (will be regenerated)
+				if s.hnsw != nil {
+					oldVectors, err := s.db.GetVectorsForDocument(docID)
+					if err != nil {
+						log.Printf("warning: could not get old vectors for %s: %v", docID, err)
+					}
+					for _, v := range oldVectors {
+						hnswID := fmt.Sprintf("%s:%s", v.DocumentID, v.BlockID)
+						s.hnsw.Delete(hnswID)
+					}
+				}
+				s.db.DeleteVectorsForDocument(docID)
+			}
+		}
+		if docID == "" {
+			docID = uuid.New().String()
+		}
+		if isUpdate {
+			log.Printf("Updating existing document %s (source=%s, externalID=%s)", docID, d.Source, d.ExternalID)
+		}
 
 		// Convert entries to blocks
 		var blocks []ContentBlock
